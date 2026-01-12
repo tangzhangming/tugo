@@ -2966,10 +2966,13 @@ func (g *CodeGen) generateCallExpr(expr *parser.CallExpr) string {
 		// 尝试获取接收者类型来查找重载
 		receiverType := g.getReceiverType(sel.X)
 		if receiverType != "" {
+			// 确定类所在的包（可能是当前包或导入的包）
+			classPkg := g.getClassPackage(receiverType)
+			
 			// 检查是否有重载
-			if g.transpiler.table.IsMethodOverloaded(g.transpiler.pkg, receiverType, methodName) {
+			if g.transpiler.table.IsMethodOverloaded(classPkg, receiverType, methodName) {
 				// 解析重载方法
-				mangledName := g.resolveOverloadedMethod(receiverType, methodName, expr.Arguments)
+				mangledName := g.resolveOverloadedMethodInPkg(classPkg, receiverType, methodName, expr.Arguments)
 				x := g.generateExpression(sel.X)
 				var args []string
 				for _, arg := range expr.Arguments {
@@ -3663,8 +3666,27 @@ func (g *CodeGen) inferExprType(expr parser.Expression) string {
 	}
 }
 
+// getClassPackage 获取类所在的包名
+func (g *CodeGen) getClassPackage(className string) string {
+	// 首先检查当前包
+	if g.transpiler.table.GetClass(g.transpiler.pkg, className) != nil {
+		return g.transpiler.pkg
+	}
+	// 检查导入的包
+	if pkgName, ok := g.typeToPackage[className]; ok {
+		return pkgName
+	}
+	// 默认返回当前包
+	return g.transpiler.pkg
+}
+
 // resolveOverloadedMethod 解析重载方法调用，返回修饰后的方法名
 func (g *CodeGen) resolveOverloadedMethod(receiver, methodName string, args []parser.Expression) string {
+	return g.resolveOverloadedMethodInPkg(g.transpiler.pkg, receiver, methodName, args)
+}
+
+// resolveOverloadedMethodInPkg 在指定包中解析重载方法调用
+func (g *CodeGen) resolveOverloadedMethodInPkg(pkg, receiver, methodName string, args []parser.Expression) string {
 	// 推断参数类型
 	var argTypes []string
 	for _, arg := range args {
@@ -3672,13 +3694,13 @@ func (g *CodeGen) resolveOverloadedMethod(receiver, methodName string, args []pa
 	}
 
 	// 查找匹配的重载
-	sym := g.transpiler.table.GetOverloadedMethod(g.transpiler.pkg, receiver, methodName, argTypes)
+	sym := g.transpiler.table.GetOverloadedMethod(pkg, receiver, methodName, argTypes)
 	if sym != nil {
 		return sym.MangledName
 	}
 
 	// 如果精确匹配失败，尝试按参数数量匹配
-	group := g.transpiler.table.GetOverloadGroup(g.transpiler.pkg, receiver, methodName)
+	group := g.transpiler.table.GetOverloadGroup(pkg, receiver, methodName)
 	if group != nil {
 		for _, method := range group.Methods {
 			if len(method.ParamTypes) == len(args) {
