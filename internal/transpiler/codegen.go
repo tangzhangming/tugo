@@ -27,15 +27,19 @@ type CodeGen struct {
 	currentFuncResults []*parser.Field      // 当前函数的返回值类型
 	tryCounter         int                  // try 块计数器（用于生成唯一标签）
 	inTryBlock         bool                 // 是否在 try 块内
+	methodOverloads    map[string]bool      // 当前类/结构体的重载方法名 (key: methodName)
+	varTypes           map[string]string    // 变量名到类型名的映射（用于重载解析）
 }
 
 // NewCodeGen 创建一个新的代码生成器
 func NewCodeGen(t *Transpiler) *CodeGen {
 	return &CodeGen{
-		transpiler:    t,
-		typeToPackage: make(map[string]string),
-		goImports:     make(map[string]bool),
-		tugoImports:   make(map[string]string),
+		transpiler:      t,
+		typeToPackage:   make(map[string]string),
+		goImports:       make(map[string]bool),
+		tugoImports:     make(map[string]string),
+		methodOverloads: make(map[string]bool),
+		varTypes:        make(map[string]string),
 	}
 }
 
@@ -679,7 +683,17 @@ func (g *CodeGen) generateStructConstructor(decl *parser.StructDecl, structName 
 // generateStructMethod 生成结构体方法（指针接收者）
 func (g *CodeGen) generateStructMethod(decl *parser.StructDecl, structName string, method *parser.ClassMethod) {
 	isPublic := method.Visibility == "public"
-	methodName := symbol.ToGoName(method.Name, isPublic)
+	
+	// 使用原始结构体名进行重载查找
+	originalName := decl.Name
+	
+	// 检查是否是重载方法，使用修饰后的名称
+	var methodName string
+	if g.transpiler.table.IsMethodOverloaded(g.transpiler.pkg, originalName, method.Name) {
+		methodName = symbol.GenerateMangledName(method.Name, method.Params, isPublic)
+	} else {
+		methodName = symbol.ToGoName(method.Name, isPublic)
+	}
 
 	// 方法签名（指针接收者）
 	g.write(fmt.Sprintf("func (s *%s) %s(", structName, methodName))
@@ -787,12 +801,26 @@ func (g *CodeGen) generateStaticClass(decl *parser.ClassDecl, className string) 
 // generateStaticClassMethod 生成静态类方法（包级函数）
 func (g *CodeGen) generateStaticClassMethod(decl *parser.ClassDecl, className string, method *parser.ClassMethod) {
 	isPublic := method.Visibility == "public"
+	
+	// 检查是否是重载方法
+	isOverloaded := g.transpiler.table.IsMethodOverloaded(g.transpiler.pkg, decl.Name, method.Name)
+	
 	// 命名规则: 公开方法 -> ClassName + MethodName, 私有方法 -> className + MethodName (首字母小写)
 	var funcName string
-	if isPublic {
-		funcName = className + symbol.ToGoName(method.Name, true)
+	if isOverloaded {
+		// 重载方法使用修饰名
+		mangledName := symbol.GenerateMangledName(method.Name, method.Params, isPublic)
+		if isPublic {
+			funcName = className + mangledName
+		} else {
+			funcName = strings.ToLower(string(decl.Name[0])) + decl.Name[1:] + mangledName
+		}
 	} else {
-		funcName = strings.ToLower(string(decl.Name[0])) + decl.Name[1:] + symbol.ToGoName(method.Name, true)
+		if isPublic {
+			funcName = className + symbol.ToGoName(method.Name, true)
+		} else {
+			funcName = strings.ToLower(string(decl.Name[0])) + decl.Name[1:] + symbol.ToGoName(method.Name, true)
+		}
 	}
 
 	g.write(fmt.Sprintf("func %s(", funcName))
@@ -1447,10 +1475,54 @@ func (g *CodeGen) generateClassMethod(decl *parser.ClassDecl, className string, 
 	}
 }
 
+// hasParamNameConflict 检查方法参数是否和指定名称冲突
+func hasParamNameConflict(params []*parser.Field, name string) bool {
+	for _, param := range params {
+		if param.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// getReceiverName 获取方法接收者名称，避免和参数名冲突
+func getReceiverName(params []*parser.Field, defaultName string) string {
+	if !hasParamNameConflict(params, defaultName) {
+		return defaultName
+	}
+	// 如果默认名称冲突，尝试其他名称
+	alternativeNames := []string{"this", "self", "recv", "_t", "_this", "_self"}
+	for _, name := range alternativeNames {
+		if !hasParamNameConflict(params, name) {
+			return name
+		}
+	}
+	// 极端情况：所有备选名称都冲突，使用带数字的名称
+	for i := 0; ; i++ {
+		name := fmt.Sprintf("_recv%d", i)
+		if !hasParamNameConflict(params, name) {
+			return name
+		}
+	}
+}
+
 // generateClassMethodSimple 生成简单方法
 func (g *CodeGen) generateClassMethodSimple(className, methodName string, method *parser.ClassMethod) {
+	// 获取原始类名（用于重载查找）
+	originalClassName := g.getOriginalClassName(className)
+
+	// 检查是否是重载方法，使用修饰后的名称
+	actualMethodName := methodName
+	if g.transpiler.table.IsMethodOverloaded(g.transpiler.pkg, originalClassName, method.Name) {
+		isPublic := method.Visibility == "public" || method.Visibility == "protected"
+		actualMethodName = symbol.GenerateMangledName(method.Name, method.Params, isPublic)
+	}
+
+	// 获取接收者名称（避免和参数名冲突）
+	receiverName := getReceiverName(method.Params, "t")
+
 	g.writeIndent()
-	g.write(fmt.Sprintf("func (t *%s) %s(", className, methodName))
+	g.write(fmt.Sprintf("func (%s *%s) %s(", receiverName, className, actualMethodName))
 
 	// 参数
 	for i, param := range method.Params {
@@ -1506,7 +1578,7 @@ func (g *CodeGen) generateClassMethodSimple(className, methodName string, method
 
 	// 方法体
 	if method.Body != nil {
-		g.currentReceiver = "t"
+		g.currentReceiver = receiverName
 		g.currentFuncErrable = method.Errable
 		g.currentFuncResults = method.Results
 		for _, stmt := range method.Body.Statements {
@@ -1523,7 +1595,16 @@ func (g *CodeGen) generateClassMethodSimple(className, methodName string, method
 
 // generateClassMethodWithDefaults 生成带默认参数的方法
 func (g *CodeGen) generateClassMethodWithDefaults(className, methodName string, method *parser.ClassMethod) {
-	optsName := fmt.Sprintf("%s%sOpts", className, methodName)
+	// 获取原始类名（用于重载查找）
+	originalClassName := g.getOriginalClassName(className)
+
+	// 检查是否是重载方法，使用修饰后的名称
+	actualMethodName := methodName
+	if g.transpiler.table.IsMethodOverloaded(g.transpiler.pkg, originalClassName, method.Name) {
+		isPublic := method.Visibility == "public" || method.Visibility == "protected"
+		actualMethodName = symbol.GenerateMangledName(method.Name, method.Params, isPublic)
+	}
+	optsName := fmt.Sprintf("%s%sOpts", className, actualMethodName)
 
 	// 生成 Opts 结构体
 	g.writeLine(fmt.Sprintf("type %s struct {", optsName))
@@ -1555,7 +1636,7 @@ func (g *CodeGen) generateClassMethodWithDefaults(className, methodName string, 
 
 	// 生成方法
 	g.writeIndent()
-	g.write(fmt.Sprintf("func (t *%s) %s(opts %s)", className, methodName, optsName))
+	g.write(fmt.Sprintf("func (t *%s) %s(opts %s)", className, actualMethodName, optsName))
 
 	// 返回值
 	if len(method.Results) > 0 {
@@ -1706,6 +1787,11 @@ func (g *CodeGen) generateShortVarDecl(decl *parser.ShortVarDecl) {
 		names[i] = symbol.TransformDollarVar(name)
 	}
 
+	// 跟踪变量类型（用于重载解析）
+	if len(decl.Names) == 1 {
+		g.trackVarType(decl.Names[0], decl.Value)
+	}
+
 	// 检查Value是否是临时的ArrayLiteral（表示多值）
 	if arrLit, ok := decl.Value.(*parser.ArrayLiteral); ok && len(decl.Names) > 1 {
 		// 多值赋值：a, b := 1, 2
@@ -1719,6 +1805,33 @@ func (g *CodeGen) generateShortVarDecl(decl *parser.ShortVarDecl) {
 		// 单值或函数调用
 		line := fmt.Sprintf("%s := %s", strings.Join(names, ", "), g.generateExpression(decl.Value))
 		g.writeLine(line)
+	}
+}
+
+// trackVarType 跟踪变量类型
+func (g *CodeGen) trackVarType(varName string, value parser.Expression) {
+	switch v := value.(type) {
+	case *parser.NewExpr:
+		// new ClassName() -> 类型是 ClassName
+		if ident, ok := v.Type.(*parser.Identifier); ok {
+			g.varTypes[varName] = ident.Value
+		}
+	case *parser.CallExpr:
+		// NewClassName() 或 NewStructName() -> 类型是类名/结构体名
+		if ident, ok := v.Function.(*parser.Identifier); ok {
+			funcName := ident.Value
+			// 检查是否是 NewXxx 模式的构造函数调用
+			if strings.HasPrefix(funcName, "New") && len(funcName) > 3 {
+				typeName := funcName[3:] // 去掉 "New" 前缀
+				// 尝试匹配首字母大小写不同的情况
+				g.varTypes[varName] = typeName
+			}
+		}
+	case *parser.StructLiteral:
+		// StructName{} -> 类型是结构体名
+		if ident, ok := v.Type.(*parser.Identifier); ok {
+			g.varTypes[varName] = ident.Value
+		}
 	}
 }
 
@@ -2846,12 +2959,113 @@ func (g *CodeGen) generateCallExpr(expr *parser.CallExpr) string {
 		}
 	}
 
+	// 检查是否是方法调用（obj.method()）且方法有重载
+	if sel, ok := expr.Function.(*parser.SelectorExpr); ok {
+		methodName := sel.Sel
+		
+		// 尝试获取接收者类型来查找重载
+		receiverType := g.getReceiverType(sel.X)
+		if receiverType != "" {
+			// 检查是否有重载
+			if g.transpiler.table.IsMethodOverloaded(g.transpiler.pkg, receiverType, methodName) {
+				// 解析重载方法
+				mangledName := g.resolveOverloadedMethod(receiverType, methodName, expr.Arguments)
+				x := g.generateExpression(sel.X)
+				var args []string
+				for _, arg := range expr.Arguments {
+					args = append(args, g.generateExpression(arg))
+				}
+				return x + "." + mangledName + "(" + strings.Join(args, ", ") + ")"
+			}
+		}
+	}
+
 	funcExpr := g.generateExpression(expr.Function)
 	var args []string
 	for _, arg := range expr.Arguments {
 		args = append(args, g.generateExpression(arg))
 	}
 	return funcExpr + "(" + strings.Join(args, ", ") + ")"
+}
+
+// getOriginalClassName 获取原始类名（Go名称 -> Tugo名称）
+func (g *CodeGen) getOriginalClassName(goClassName string) string {
+	// 检查当前类
+	if g.currentClassDecl != nil && symbol.ToGoName(g.currentClassDecl.Name, g.currentClassDecl.Public) == goClassName {
+		return g.currentClassDecl.Name
+	}
+	// 检查当前结构体
+	if g.currentStructDecl != nil && symbol.ToGoName(g.currentStructDecl.Name, g.currentStructDecl.Public) == goClassName {
+		return g.currentStructDecl.Name
+	}
+	// 遍历类声明
+	for _, classDecl := range g.transpiler.classDecls {
+		if symbol.ToGoName(classDecl.Name, classDecl.Public) == goClassName {
+			return classDecl.Name
+		}
+	}
+	// 如果找不到，返回原名（可能是非公开类，名称相同）
+	return goClassName
+}
+
+// getReceiverType 获取表达式的接收者类型（用于重载解析）
+func (g *CodeGen) getReceiverType(expr parser.Expression) string {
+	switch e := expr.(type) {
+	case *parser.ThisExpr:
+		// this 表达式，返回当前类/结构体名
+		if g.currentClassDecl != nil {
+			return g.currentClassDecl.Name
+		}
+		if g.currentStructDecl != nil {
+			return g.currentStructDecl.Name
+		}
+		return ""
+	case *parser.Identifier:
+		// 首先检查跟踪的变量类型
+		if typeName, ok := g.varTypes[e.Value]; ok {
+			return typeName
+		}
+		// 检查是否是类名
+		for _, classDecl := range g.transpiler.classDecls {
+			if classDecl.Name == e.Value {
+				return e.Value
+			}
+		}
+		// 检查符号表中是否有此结构体
+		if sym := g.transpiler.table.Get(g.transpiler.pkg, e.Value); sym != nil {
+			if sym.Kind == symbol.SymbolStruct {
+				return e.Value
+			}
+		}
+		return ""
+	case *parser.CallExpr:
+		// 函数调用返回值，检查是否是 NewXxx() 模式
+		if ident, ok := e.Function.(*parser.Identifier); ok {
+			funcName := ident.Value
+			if strings.HasPrefix(funcName, "New") && len(funcName) > 3 {
+				typeName := funcName[3:]
+				// 检查是否是已知的类
+				for _, classDecl := range g.transpiler.classDecls {
+					if classDecl.Name == typeName || strings.EqualFold(classDecl.Name, typeName) {
+						return classDecl.Name
+					}
+				}
+				// 检查符号表中是否有此结构体
+				if sym := g.transpiler.table.Get(g.transpiler.pkg, typeName); sym != nil && sym.Kind == symbol.SymbolStruct {
+					return typeName
+				}
+			}
+		}
+		return ""
+	case *parser.NewExpr:
+		// new 表达式，返回类名
+		if ident, ok := e.Type.(*parser.Identifier); ok {
+			return ident.Value
+		}
+		return ""
+	default:
+		return ""
+	}
 }
 
 // generateDefaultParamCall 生成带默认参数函数的调用
@@ -3369,6 +3583,117 @@ func (g *CodeGen) generateNewExpr(expr *parser.NewExpr) string {
 // generateType 生成类型
 func (g *CodeGen) generateType(expr parser.Expression) string {
 	return g.generateExpression(expr)
+}
+
+// inferExprType 推断表达式的类型（用于重载解析）
+func (g *CodeGen) inferExprType(expr parser.Expression) string {
+	if expr == nil {
+		return "any"
+	}
+
+	switch e := expr.(type) {
+	case *parser.IntegerLiteral:
+		return "int"
+	case *parser.FloatLiteral:
+		return "float64"
+	case *parser.StringLiteral:
+		return "string"
+	case *parser.CharLiteral:
+		return "rune"
+	case *parser.BoolLiteral:
+		return "bool"
+	case *parser.NilLiteral:
+		return "nil"
+	case *parser.Identifier:
+		// 查找变量类型（简化：返回 any）
+		// 实际实现需要维护变量类型表
+		return "any"
+	case *parser.UnaryExpr:
+		if e.Operator == "&" {
+			return "p" + g.inferExprType(e.Operand)
+		} else if e.Operator == "*" {
+			inner := g.inferExprType(e.Operand)
+			if len(inner) > 1 && inner[0] == 'p' {
+				return inner[1:]
+			}
+			return "any"
+		}
+		return g.inferExprType(e.Operand)
+	case *parser.CallExpr:
+		// 函数调用返回类型（简化：返回 any）
+		return "any"
+	case *parser.ArrayLiteral:
+		if e.Type != nil {
+			return "s" + symbol.GenerateTypeSignature(e.Type)
+		}
+		return "sany"
+	case *parser.SliceLiteral:
+		if e.Type != nil {
+			return "s" + symbol.GenerateTypeSignature(e.Type)
+		}
+		return "sany"
+	case *parser.MapLiteral:
+		if e.KeyType != nil && e.ValType != nil {
+			return "m" + symbol.GenerateTypeSignature(e.KeyType) + symbol.GenerateTypeSignature(e.ValType)
+		}
+		return "manyany"
+	case *parser.StructLiteral:
+		if ident, ok := e.Type.(*parser.Identifier); ok {
+			return ident.Value
+		}
+		return "any"
+	case *parser.NewExpr:
+		if ident, ok := e.Type.(*parser.Identifier); ok {
+			return "p" + ident.Value
+		}
+		return "pany"
+	case *parser.BinaryExpr:
+		// 二元运算返回与操作数相同类型
+		return g.inferExprType(e.Left)
+	case *parser.IndexExpr:
+		// 索引表达式（简化）
+		return "any"
+	case *parser.SelectorExpr:
+		// 选择器表达式（简化）
+		return "any"
+	case *parser.ParenExpr:
+		return g.inferExprType(e.X)
+	default:
+		return "any"
+	}
+}
+
+// resolveOverloadedMethod 解析重载方法调用，返回修饰后的方法名
+func (g *CodeGen) resolveOverloadedMethod(receiver, methodName string, args []parser.Expression) string {
+	// 推断参数类型
+	var argTypes []string
+	for _, arg := range args {
+		argTypes = append(argTypes, g.inferExprType(arg))
+	}
+
+	// 查找匹配的重载
+	sym := g.transpiler.table.GetOverloadedMethod(g.transpiler.pkg, receiver, methodName, argTypes)
+	if sym != nil {
+		return sym.MangledName
+	}
+
+	// 如果精确匹配失败，尝试按参数数量匹配
+	group := g.transpiler.table.GetOverloadGroup(g.transpiler.pkg, receiver, methodName)
+	if group != nil {
+		for _, method := range group.Methods {
+			if len(method.ParamTypes) == len(args) {
+				// 找到参数数量匹配的版本
+				return method.MangledName
+			}
+		}
+		// 如果还是没找到，返回第一个版本
+		if len(group.Methods) > 0 {
+			return group.Methods[0].MangledName
+		}
+	}
+
+	// 回退到标准名称转换
+	return symbol.ToGoName(methodName, true)
 }
 
 // write 写入内容

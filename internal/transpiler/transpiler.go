@@ -92,7 +92,7 @@ func (t *Transpiler) TranspileFileWithName(file *parser.File, fileName string) (
 		}
 	}
 
-	// 校验 implements、extends 和 static class
+	// 校验 implements、extends、static class 和方法重载
 	for _, stmt := range file.Statements {
 		if classDecl, ok := stmt.(*parser.ClassDecl); ok {
 			if classDecl.Static {
@@ -108,17 +108,24 @@ func (t *Transpiler) TranspileFileWithName(file *parser.File, fileName string) (
 			if t.IsEntryClass(classDecl) {
 				t.validateMainMethod(classDecl)
 			}
+			// 验证方法重载的合法性
+			t.validateOverloads(classDecl)
 		}
 		// 校验结构体
 		if structDecl, ok := stmt.(*parser.StructDecl); ok {
 			if len(structDecl.Implements) > 0 {
 				t.validateStructImplements(structDecl)
 			}
+			// 验证结构体方法重载的合法性
+			t.validateStructOverloads(structDecl)
 		}
 	}
 
 	// 校验 errable 函数调用
 	t.validateErrableCalls(file)
+	
+	// 校验方法/字段访问的可见性
+	t.validateVisibility(file)
 	
 	// 校验未定义的符号
 	t.validateUndefinedSymbols(file)
@@ -1188,4 +1195,324 @@ func (t *Transpiler) collectUsedTypesInExpr(expr parser.Expression, usedTypes ma
 	case *parser.SelectorExpr:
 		t.collectUsedTypesInExpr(e.X, usedTypes)
 	}
+}
+
+// validateOverloads 验证类方法重载的合法性
+// 检查是否有重复的参数签名
+func (t *Transpiler) validateOverloads(classDecl *parser.ClassDecl) {
+	// 按方法名分组
+	methodsByName := make(map[string][]*parser.ClassMethod)
+	for _, method := range classDecl.Methods {
+		methodsByName[method.Name] = append(methodsByName[method.Name], method)
+	}
+
+	// 检查每个方法名组
+	for methodName, methods := range methodsByName {
+		if len(methods) <= 1 {
+			continue // 没有重载
+		}
+
+		// 检查签名唯一性
+		signatures := make(map[string]bool)
+		for _, method := range methods {
+			sig := symbol.GenerateParamSignature(method.Params)
+			if signatures[sig] {
+				t.errors = append(t.errors, i18n.T(i18n.ErrDuplicateOverloadSignature,
+					classDecl.Name, methodName, sig))
+			}
+			signatures[sig] = true
+		}
+	}
+}
+
+// validateStructOverloads 验证结构体方法重载的合法性
+func (t *Transpiler) validateStructOverloads(structDecl *parser.StructDecl) {
+	// 按方法名分组
+	methodsByName := make(map[string][]*parser.ClassMethod)
+	for _, method := range structDecl.Methods {
+		methodsByName[method.Name] = append(methodsByName[method.Name], method)
+	}
+
+	// 检查每个方法名组
+	for methodName, methods := range methodsByName {
+		if len(methods) <= 1 {
+			continue // 没有重载
+		}
+
+		// 检查签名唯一性
+		signatures := make(map[string]bool)
+		for _, method := range methods {
+			sig := symbol.GenerateParamSignature(method.Params)
+			if signatures[sig] {
+				t.errors = append(t.errors, i18n.T(i18n.ErrDuplicateOverloadSignature,
+					structDecl.Name, methodName, sig))
+			}
+			signatures[sig] = true
+		}
+	}
+}
+
+// validateVisibility 校验方法/字段访问的可见性
+func (t *Transpiler) validateVisibility(file *parser.File) {
+	// 从导入中构建类型到包名的映射
+	typeToPackage := make(map[string]string)
+	for _, impDecl := range file.Imports {
+		for _, spec := range impDecl.Specs {
+			if spec.FromGo {
+				continue // 跳过 Go 标准库导入
+			}
+			// 获取类型名
+			typeName := spec.TypeName
+			if spec.Alias != "" {
+				typeName = spec.Alias
+			}
+			typeToPackage[typeName] = spec.PkgName
+		}
+	}
+
+	for _, stmt := range file.Statements {
+		switch s := stmt.(type) {
+		case *parser.ClassDecl:
+			// 检查类中所有方法的方法调用
+			for _, method := range s.Methods {
+				if method.Body != nil {
+					localVarTypes := make(map[string]string)
+					t.validateVisibilityInBlock(s.Name, method.Body, localVarTypes, typeToPackage)
+				}
+			}
+			if s.InitMethod != nil && s.InitMethod.Body != nil {
+				localVarTypes := make(map[string]string)
+				t.validateVisibilityInBlock(s.Name, s.InitMethod.Body, localVarTypes, typeToPackage)
+			}
+		case *parser.StructDecl:
+			for _, method := range s.Methods {
+				if method.Body != nil {
+					localVarTypes := make(map[string]string)
+					t.validateVisibilityInBlock(s.Name, method.Body, localVarTypes, typeToPackage)
+				}
+			}
+			if s.InitMethod != nil && s.InitMethod.Body != nil {
+				localVarTypes := make(map[string]string)
+				t.validateVisibilityInBlock(s.Name, s.InitMethod.Body, localVarTypes, typeToPackage)
+			}
+		case *parser.FuncDecl:
+			// 顶层函数（如 main）
+			if s.Body != nil {
+				localVarTypes := make(map[string]string)
+				t.validateVisibilityInBlock("", s.Body, localVarTypes, typeToPackage)
+			}
+		}
+	}
+}
+
+// validateVisibilityInBlock 在代码块中验证可见性
+func (t *Transpiler) validateVisibilityInBlock(callerClass string, block *parser.BlockStmt, varTypes map[string]string, typeToPackage map[string]string) {
+	for _, stmt := range block.Statements {
+		t.validateVisibilityInStmt(callerClass, stmt, varTypes, typeToPackage)
+	}
+}
+
+// validateVisibilityInStmt 在语句中验证可见性
+func (t *Transpiler) validateVisibilityInStmt(callerClass string, stmt parser.Statement, varTypes map[string]string, typeToPackage map[string]string) {
+	switch s := stmt.(type) {
+	case *parser.ExpressionStmt:
+		t.validateVisibilityInExpr(callerClass, s.Expression, varTypes, typeToPackage)
+	case *parser.ReturnStmt:
+		for _, v := range s.Values {
+			t.validateVisibilityInExpr(callerClass, v, varTypes, typeToPackage)
+		}
+	case *parser.AssignStmt:
+		for _, r := range s.Right {
+			t.validateVisibilityInExpr(callerClass, r, varTypes, typeToPackage)
+		}
+	case *parser.ShortVarDecl:
+		// 追踪变量类型
+		if len(s.Names) == 1 {
+			if typeName := t.inferExprType(s.Value); typeName != "" {
+				varTypes[s.Names[0]] = typeName
+			}
+		}
+		t.validateVisibilityInExpr(callerClass, s.Value, varTypes, typeToPackage)
+	case *parser.VarDecl:
+		if s.Value != nil {
+			// 追踪变量类型
+			if len(s.Names) == 1 {
+				if typeName := t.inferExprType(s.Value); typeName != "" {
+					varTypes[s.Names[0]] = typeName
+				}
+			}
+			t.validateVisibilityInExpr(callerClass, s.Value, varTypes, typeToPackage)
+		}
+	case *parser.IfStmt:
+		if s.Condition != nil {
+			t.validateVisibilityInExpr(callerClass, s.Condition, varTypes, typeToPackage)
+		}
+		if s.Consequence != nil {
+			t.validateVisibilityInBlock(callerClass, s.Consequence, varTypes, typeToPackage)
+		}
+		if alt, ok := s.Alternative.(*parser.BlockStmt); ok {
+			t.validateVisibilityInBlock(callerClass, alt, varTypes, typeToPackage)
+		} else if altIf, ok := s.Alternative.(*parser.IfStmt); ok {
+			t.validateVisibilityInStmt(callerClass, altIf, varTypes, typeToPackage)
+		}
+	case *parser.ForStmt:
+		if s.Body != nil {
+			t.validateVisibilityInBlock(callerClass, s.Body, varTypes, typeToPackage)
+		}
+	case *parser.RangeStmt:
+		if s.Body != nil {
+			t.validateVisibilityInBlock(callerClass, s.Body, varTypes, typeToPackage)
+		}
+	case *parser.TryStmt:
+		if s.Body != nil {
+			t.validateVisibilityInBlock(callerClass, s.Body, varTypes, typeToPackage)
+		}
+		if s.Catch != nil && s.Catch.Body != nil {
+			t.validateVisibilityInBlock(callerClass, s.Catch.Body, varTypes, typeToPackage)
+		}
+	case *parser.BlockStmt:
+		t.validateVisibilityInBlock(callerClass, s, varTypes, typeToPackage)
+	}
+}
+
+// validateVisibilityInExpr 在表达式中验证可见性
+func (t *Transpiler) validateVisibilityInExpr(callerClass string, expr parser.Expression, varTypes map[string]string, typeToPackage map[string]string) {
+	if expr == nil {
+		return
+	}
+
+	switch e := expr.(type) {
+	case *parser.CallExpr:
+		// 检查方法调用
+		if sel, ok := e.Function.(*parser.SelectorExpr); ok {
+			t.checkMethodCallVisibility(callerClass, sel, e, varTypes, typeToPackage)
+		}
+		// 检查参数
+		for _, arg := range e.Arguments {
+			t.validateVisibilityInExpr(callerClass, arg, varTypes, typeToPackage)
+		}
+	case *parser.SelectorExpr:
+		// 检查字段访问（不是方法调用的情况）
+		t.validateVisibilityInExpr(callerClass, e.X, varTypes, typeToPackage)
+	case *parser.BinaryExpr:
+		t.validateVisibilityInExpr(callerClass, e.Left, varTypes, typeToPackage)
+		t.validateVisibilityInExpr(callerClass, e.Right, varTypes, typeToPackage)
+	case *parser.UnaryExpr:
+		t.validateVisibilityInExpr(callerClass, e.Operand, varTypes, typeToPackage)
+	case *parser.IndexExpr:
+		t.validateVisibilityInExpr(callerClass, e.X, varTypes, typeToPackage)
+		t.validateVisibilityInExpr(callerClass, e.Index, varTypes, typeToPackage)
+	case *parser.NewExpr:
+		for _, arg := range e.Arguments {
+			t.validateVisibilityInExpr(callerClass, arg, varTypes, typeToPackage)
+		}
+	}
+}
+
+// checkMethodCallVisibility 检查方法调用的可见性
+func (t *Transpiler) checkMethodCallVisibility(callerClass string, sel *parser.SelectorExpr, call *parser.CallExpr, varTypes map[string]string, typeToPackage map[string]string) {
+	methodName := sel.Sel
+
+	// 获取接收者的类型
+	receiverType := t.inferReceiverTypeWithVars(sel.X, varTypes, typeToPackage)
+	if receiverType == "" {
+		return // 无法确定类型，跳过检查
+	}
+
+	// 如果调用者和被调用者是同一个类，允许访问私有方法
+	if receiverType == callerClass {
+		return
+	}
+
+	// 查找目标类的方法，检查可见性
+	// 首先在当前包中查找
+	classInfo := t.table.GetClass(t.pkg, receiverType)
+	if classInfo == nil {
+		// 尝试从类型导入映射中获取包名
+		if pkgName, ok := typeToPackage[receiverType]; ok {
+			classInfo = t.table.GetClass(pkgName, receiverType)
+		}
+	}
+
+	if classInfo != nil {
+		// 检查方法
+		for _, method := range classInfo.Methods {
+			if method.Name == methodName {
+				isPublic := method.Visibility == "public" || method.Visibility == "protected"
+				if !isPublic {
+					callerName := callerClass
+					if callerName == "" {
+						callerName = "main"
+					}
+					t.errors = append(t.errors, i18n.T(i18n.ErrPrivateMethodAccess,
+						callerName, receiverType, methodName))
+				}
+				return
+			}
+		}
+	}
+}
+
+// inferExprType 推断表达式的类型（用于变量追踪）
+func (t *Transpiler) inferExprType(expr parser.Expression) string {
+	switch e := expr.(type) {
+	case *parser.NewExpr:
+		if ident, ok := e.Type.(*parser.Identifier); ok {
+			return ident.Value
+		}
+	case *parser.CallExpr:
+		// 函数调用返回值，检查是否是 NewXxx 模式
+		if ident, ok := e.Function.(*parser.Identifier); ok {
+			funcName := ident.Value
+			if len(funcName) > 3 && funcName[:3] == "New" {
+				return funcName[3:]
+			}
+		}
+	case *parser.StructLiteral:
+		if ident, ok := e.Type.(*parser.Identifier); ok {
+			return ident.Value
+		}
+	}
+	return ""
+}
+
+// inferReceiverTypeWithVars 推断表达式的类型（使用变量类型表）
+func (t *Transpiler) inferReceiverTypeWithVars(expr parser.Expression, varTypes map[string]string, typeToPackage map[string]string) string {
+	switch e := expr.(type) {
+	case *parser.Identifier:
+		// 首先检查变量类型表
+		if typeName, ok := varTypes[e.Value]; ok {
+			return typeName
+		}
+		// 检查是否是类名
+		if classInfo := t.table.GetClass(t.pkg, e.Value); classInfo != nil {
+			return e.Value
+		}
+		return ""
+	case *parser.NewExpr:
+		if ident, ok := e.Type.(*parser.Identifier); ok {
+			return ident.Value
+		}
+	case *parser.ThisExpr:
+		// this 表达式，返回当前上下文的类名（需要传递上下文）
+		return ""
+	case *parser.CallExpr:
+		// 函数调用返回值，检查是否是 NewXxx 模式
+		if ident, ok := e.Function.(*parser.Identifier); ok {
+			funcName := ident.Value
+			if len(funcName) > 3 && funcName[:3] == "New" {
+				typeName := funcName[3:]
+				// 检查在当前包或导入的包中是否存在该类
+				if t.table.GetClass(t.pkg, typeName) != nil {
+					return typeName
+				}
+				for pkgName := range typeToPackage {
+					if t.table.GetClass(pkgName, typeName) != nil {
+						return typeName
+					}
+				}
+			}
+		}
+	}
+	return ""
 }

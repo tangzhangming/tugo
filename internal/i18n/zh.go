@@ -55,6 +55,14 @@ var zhMessages = map[string]string{
 	ErrTooManyVariables:           "变量太多: 函数返回 %d 个值，但尝试赋值给 %d 个变量",
 	ErrErrableMultiReturnNoAssign: "返回 %d 个值的 errable 函数不能直接作为表达式使用，必须赋值给变量",
 
+	// Overload errors
+	ErrDuplicateOverloadSignature: "类 %s 方法 %s: 重载签名重复 '%s'",
+	ErrOverloadOnlyReturnDiffers:  "类 %s 方法 %s: 重载方法不能仅通过返回类型区分",
+
+	// Visibility errors
+	ErrPrivateMethodAccess: "%s: 无法访问 %s 的私有方法 '%s'",
+	ErrPrivateFieldAccess:  "%s: 无法访问 %s 的私有字段 '%s'",
+
 	// CLI - Usage and help
 	MsgUsage:          "用法: tugo <命令> [参数]",
 	MsgCommands:       "命令:",

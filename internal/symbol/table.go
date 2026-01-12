@@ -24,15 +24,31 @@ const (
 
 // Symbol 表示一个符号
 type Symbol struct {
-	Name        string     // 原始名称
-	GoName      string     // 翻译后的 Go 名称
-	Kind        SymbolKind // 符号类型
-	Public      bool       // 是否公开
-	Package     string     // 所属包
-	Receiver    string     // 方法的接收者类型（仅用于方法）
-	HasDefault  bool       // 函数是否有默认参数
-	Errable     bool       // 是否可能抛出错误（返回类型带 ! 标记）
-	ResultCount int        // 返回值数量（不包括error）
+	Name         string     // 原始名称
+	GoName       string     // 翻译后的 Go 名称
+	Kind         SymbolKind // 符号类型
+	Public       bool       // 是否公开
+	Package      string     // 所属包
+	Receiver     string     // 方法的接收者类型（仅用于方法）
+	HasDefault   bool       // 函数是否有默认参数
+	Errable      bool       // 是否可能抛出错误（返回类型带 ! 标记）
+	ResultCount  int        // 返回值数量（不包括error）
+	IsOverloaded bool       // 是否是重载方法
+	MangledName  string     // 修饰后的名称（如果是重载）
+	ParamSig     string     // 参数签名（用于重载匹配）
+}
+
+// OverloadGroup 重载方法组
+type OverloadGroup struct {
+	Name    string              // 原始方法名
+	Methods []*OverloadedMethod // 所有重载版本
+}
+
+// OverloadedMethod 重载方法信息
+type OverloadedMethod struct {
+	Symbol      *Symbol  // 原符号
+	MangledName string   // 修饰后的名称
+	ParamTypes  []string // 参数类型签名
 }
 
 // InterfaceInfo 存储接口的完整信息
@@ -61,19 +77,21 @@ type ClassInfo struct {
 
 // Table 符号表
 type Table struct {
-	symbols    map[string]*Symbol         // key: package.name 或 package.receiver.name（方法）
-	packages   map[string]bool            // 所有包名
-	interfaces map[string]*InterfaceInfo  // key: package.name
-	classes    map[string]*ClassInfo      // key: package.name
+	symbols        map[string]*Symbol           // key: package.name 或 package.receiver.name（方法）
+	packages       map[string]bool              // 所有包名
+	interfaces     map[string]*InterfaceInfo    // key: package.name
+	classes        map[string]*ClassInfo        // key: package.name
+	overloadGroups map[string]*OverloadGroup    // key: package.receiver.name（重载方法组）
 }
 
 // New 创建一个新的符号表
 func New() *Table {
 	return &Table{
-		symbols:    make(map[string]*Symbol),
-		packages:   make(map[string]bool),
-		interfaces: make(map[string]*InterfaceInfo),
-		classes:    make(map[string]*ClassInfo),
+		symbols:        make(map[string]*Symbol),
+		packages:       make(map[string]bool),
+		interfaces:     make(map[string]*InterfaceInfo),
+		classes:        make(map[string]*ClassInfo),
+		overloadGroups: make(map[string]*OverloadGroup),
 	}
 }
 
@@ -214,6 +232,141 @@ func TransformDollarVar(name string) string {
 	return name
 }
 
+// GenerateTypeSignature 生成类型的签名字符串（用于方法重载名称修饰）
+func GenerateTypeSignature(typ parser.Expression) string {
+	if typ == nil {
+		return "void"
+	}
+	switch t := typ.(type) {
+	case *parser.Identifier:
+		return t.Value
+	case *parser.PointerType:
+		return "p" + GenerateTypeSignature(t.Base)
+	case *parser.SliceType:
+		return "s" + GenerateTypeSignature(t.Elt)
+	case *parser.ArrayType:
+		lenStr := ""
+		if lit, ok := t.Len.(*parser.IntegerLiteral); ok {
+			lenStr = lit.Value
+		}
+		return "a" + lenStr + GenerateTypeSignature(t.Elt)
+	case *parser.MapType:
+		return "m" + GenerateTypeSignature(t.Key) + GenerateTypeSignature(t.Value)
+	case *parser.ChanType:
+		return "c" + GenerateTypeSignature(t.Value)
+	case *parser.FuncType:
+		return "f" // 简化处理函数类型
+	case *parser.InterfaceType:
+		return "i" // 简化处理接口类型
+	case *parser.StructType:
+		return "st" // 简化处理结构体类型
+	case *parser.Ellipsis:
+		return "v" + GenerateTypeSignature(t.Elt) // 可变参数
+	default:
+		return "any"
+	}
+}
+
+// GenerateParamSignature 生成参数列表的签名字符串
+func GenerateParamSignature(params []*parser.Field) string {
+	if len(params) == 0 {
+		return ""
+	}
+	var sigs []string
+	for _, p := range params {
+		sigs = append(sigs, GenerateTypeSignature(p.Type))
+	}
+	return strings.Join(sigs, "_")
+}
+
+// GenerateMangledName 生成修饰后的方法名
+func GenerateMangledName(baseName string, params []*parser.Field, isPublic bool) string {
+	goName := ToGoName(baseName, isPublic)
+	if len(params) == 0 {
+		return goName
+	}
+	return goName + "_" + GenerateParamSignature(params)
+}
+
+// overloadKey 生成重载组的键
+func overloadKey(pkg, receiver, name string) string {
+	return pkg + "." + receiver + "." + name
+}
+
+// AddOverloadGroup 添加或更新重载方法组
+func (t *Table) AddOverloadGroup(pkg, receiver, name string, sym *Symbol, params []*parser.Field) {
+	key := overloadKey(pkg, receiver, name)
+	group, exists := t.overloadGroups[key]
+	if !exists {
+		group = &OverloadGroup{
+			Name:    name,
+			Methods: make([]*OverloadedMethod, 0),
+		}
+		t.overloadGroups[key] = group
+	}
+
+	// 生成参数类型列表
+	var paramTypes []string
+	for _, p := range params {
+		paramTypes = append(paramTypes, GenerateTypeSignature(p.Type))
+	}
+
+	// 添加重载方法
+	method := &OverloadedMethod{
+		Symbol:      sym,
+		MangledName: sym.MangledName,
+		ParamTypes:  paramTypes,
+	}
+	group.Methods = append(group.Methods, method)
+}
+
+// GetOverloadGroup 获取重载方法组
+func (t *Table) GetOverloadGroup(pkg, receiver, name string) *OverloadGroup {
+	return t.overloadGroups[overloadKey(pkg, receiver, name)]
+}
+
+// GetOverloadedMethod 根据参数类型获取匹配的重载方法
+func (t *Table) GetOverloadedMethod(pkg, receiver, name string, argTypes []string) *Symbol {
+	group := t.GetOverloadGroup(pkg, receiver, name)
+	if group == nil {
+		return nil
+	}
+
+	// 查找完全匹配的重载
+	for _, method := range group.Methods {
+		if len(method.ParamTypes) != len(argTypes) {
+			continue
+		}
+		match := true
+		for i, pt := range method.ParamTypes {
+			if pt != argTypes[i] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return method.Symbol
+		}
+	}
+
+	return nil
+}
+
+// IsMethodOverloaded 检查方法是否有重载
+func (t *Table) IsMethodOverloaded(pkg, receiver, name string) bool {
+	group := t.GetOverloadGroup(pkg, receiver, name)
+	return group != nil && len(group.Methods) > 1
+}
+
+// GetAllOverloadsForMethod 获取方法的所有重载版本
+func (t *Table) GetAllOverloadsForMethod(pkg, receiver, name string) []*OverloadedMethod {
+	group := t.GetOverloadGroup(pkg, receiver, name)
+	if group == nil {
+		return nil
+	}
+	return group.Methods
+}
+
 // Collector 符号收集器
 type Collector struct {
 	table   *Table
@@ -318,6 +471,60 @@ func (c *Collector) collectStruct(decl *parser.StructDecl) {
 		Package: c.pkg,
 	}
 	c.table.Add(sym)
+
+	// 第一遍：检测哪些方法名有重载
+	methodCounts := make(map[string]int)
+	for _, method := range decl.Methods {
+		methodCounts[method.Name]++
+	}
+
+	// 收集结构体方法（检测并处理重载）
+	for _, method := range decl.Methods {
+		isPublic := method.Visibility == "public"
+		isOverloaded := methodCounts[method.Name] > 1
+
+		// 生成参数签名
+		paramSig := GenerateParamSignature(method.Params)
+
+		// 生成方法名（重载时使用修饰名）
+		var goName, mangledName string
+		if isOverloaded {
+			mangledName = GenerateMangledName(method.Name, method.Params, isPublic)
+			goName = mangledName
+		} else {
+			goName = ToGoName(method.Name, isPublic)
+			mangledName = goName
+		}
+
+		methodSym := &Symbol{
+			Name:         method.Name,
+			GoName:       goName,
+			Kind:         SymbolMethod,
+			Public:       isPublic,
+			Package:      c.pkg,
+			Receiver:     decl.Name,
+			Errable:      method.Errable,
+			ResultCount:  len(method.Results),
+			IsOverloaded: isOverloaded,
+			MangledName:  mangledName,
+			ParamSig:     paramSig,
+		}
+
+		// 检查是否有默认参数
+		for _, param := range method.Params {
+			if param.DefaultValue != nil {
+				methodSym.HasDefault = true
+				break
+			}
+		}
+
+		c.table.Add(methodSym)
+
+		// 添加到重载组
+		if isOverloaded {
+			c.table.AddOverloadGroup(c.pkg, decl.Name, method.Name, methodSym, method.Params)
+		}
+	}
 }
 
 // collectClass 收集类符号
@@ -348,18 +555,42 @@ func (c *Collector) collectClass(decl *parser.ClassDecl) {
 	}
 	c.table.AddClass(classInfo)
 
-	// 收集类方法
+	// 第一遍：检测哪些方法名有重载
+	methodCounts := make(map[string]int)
+	for _, method := range decl.Methods {
+		methodCounts[method.Name]++
+	}
+
+	// 收集类方法（检测并处理重载）
 	for _, method := range decl.Methods {
 		isPublic := method.Visibility == "public" || method.Visibility == "protected"
+		isOverloaded := methodCounts[method.Name] > 1
+
+		// 生成参数签名
+		paramSig := GenerateParamSignature(method.Params)
+
+		// 生成方法名（重载时使用修饰名）
+		var goName, mangledName string
+		if isOverloaded {
+			mangledName = GenerateMangledName(method.Name, method.Params, isPublic)
+			goName = mangledName
+		} else {
+			goName = ToGoName(method.Name, isPublic)
+			mangledName = goName
+		}
+
 		methodSym := &Symbol{
-			Name:        method.Name,
-			GoName:      ToGoName(method.Name, isPublic),
-			Kind:        SymbolClassMethod,
-			Public:      isPublic,
-			Package:     c.pkg,
-			Receiver:    decl.Name,
-			Errable:     method.Errable,
-			ResultCount: len(method.Results),
+			Name:         method.Name,
+			GoName:       goName,
+			Kind:         SymbolClassMethod,
+			Public:       isPublic,
+			Package:      c.pkg,
+			Receiver:     decl.Name,
+			Errable:      method.Errable,
+			ResultCount:  len(method.Results),
+			IsOverloaded: isOverloaded,
+			MangledName:  mangledName,
+			ParamSig:     paramSig,
 		}
 
 		// 检查是否有默认参数
@@ -371,6 +602,11 @@ func (c *Collector) collectClass(decl *parser.ClassDecl) {
 		}
 
 		c.table.Add(methodSym)
+
+		// 添加到重载组
+		if isOverloaded {
+			c.table.AddOverloadGroup(c.pkg, decl.Name, method.Name, methodSym, method.Params)
+		}
 	}
 
 	// 收集抽象方法

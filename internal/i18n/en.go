@@ -55,6 +55,14 @@ var enMessages = map[string]string{
 	ErrTooManyVariables:           "too many variables: function returns %d values but trying to assign to %d variables",
 	ErrErrableMultiReturnNoAssign: "errable function with %d return values cannot be used as expression statement, must assign to variables",
 
+	// Overload errors
+	ErrDuplicateOverloadSignature: "class %s method %s: duplicate overload signature '%s'",
+	ErrOverloadOnlyReturnDiffers:  "class %s method %s: overloaded methods cannot differ only by return type",
+
+	// Visibility errors
+	ErrPrivateMethodAccess: "%s: cannot access %s's private method '%s'",
+	ErrPrivateFieldAccess:  "%s: cannot access %s's private field '%s'",
+
 	// CLI - Usage and help
 	MsgUsage:          "Usage: tugo <command> [arguments]",
 	MsgCommands:       "Commands:",

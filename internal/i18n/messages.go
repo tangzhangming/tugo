@@ -55,8 +55,16 @@ const (
 	ErrUnusedImport    = "transpiler.unused_import"     // args: typeName, path
 
 	// Codegen errors
-	ErrTooManyVariables         = "codegen.too_many_variables"          // args: returnCount, assignCount
+	ErrTooManyVariables           = "codegen.too_many_variables"            // args: returnCount, assignCount
 	ErrErrableMultiReturnNoAssign = "codegen.errable_multi_return_no_assign" // args: returnCount
+
+	// Overload errors
+	ErrDuplicateOverloadSignature = "transpiler.duplicate_overload_signature" // args: className, methodName, signature
+	ErrOverloadOnlyReturnDiffers  = "transpiler.overload_only_return_differs" // args: className, methodName
+
+	// Visibility errors
+	ErrPrivateMethodAccess = "transpiler.private_method_access" // args: callerClass, targetClass, methodName
+	ErrPrivateFieldAccess  = "transpiler.private_field_access"  // args: callerClass, targetClass, fieldName
 )
 
 // Message keys for CLI

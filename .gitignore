@@ -1,5 +1,6 @@
 *.exe
 /.cursor/
 /.output/
+/editor/
 /examples/
 /output/
