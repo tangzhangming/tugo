@@ -2165,6 +2165,7 @@ func (g *CodeGen) generateSelectorExpr(expr *parser.SelectorExpr) string {
 func (g *CodeGen) generateStaticAccessExpr(expr *parser.StaticAccessExpr) string {
 	var className string
 	var classDecl *parser.ClassDecl
+	var pkgPrefix string // 包前缀，用于导入的类
 
 	// 获取类名和类声明
 	switch left := expr.Left.(type) {
@@ -2175,6 +2176,10 @@ func (g *CodeGen) generateStaticAccessExpr(expr *parser.StaticAccessExpr) string
 	case *parser.Identifier:
 		// ClassName:: 直接使用类名
 		className = left.Value
+		// 检查是否是导入的类型（如标准库的 Str）
+		if pkg, ok := g.typeToPackage[className]; ok {
+			pkgPrefix = pkg + "."
+		}
 		// 从 transpiler 中查找静态类声明
 		classDecl = g.transpiler.GetClassDecl(g.transpiler.pkg, className)
 	default:
@@ -2191,9 +2196,9 @@ func (g *CodeGen) generateStaticAccessExpr(expr *parser.StaticAccessExpr) string
 			if field.Name == memberName {
 				isPublic := field.Visibility == "public"
 				if isPublic {
-					return goClassName + symbol.ToGoName(memberName, true)
+					return pkgPrefix + goClassName + symbol.ToGoName(memberName, true)
 				} else {
-					return "_" + strings.ToLower(classDecl.Name) + "_" + memberName
+					return pkgPrefix + "_" + strings.ToLower(classDecl.Name) + "_" + memberName
 				}
 			}
 		}
@@ -2203,16 +2208,16 @@ func (g *CodeGen) generateStaticAccessExpr(expr *parser.StaticAccessExpr) string
 			if method.Name == memberName {
 				isPublic := method.Visibility == "public"
 				if isPublic {
-					return goClassName + symbol.ToGoName(memberName, true)
+					return pkgPrefix + goClassName + symbol.ToGoName(memberName, true)
 				} else {
-					return strings.ToLower(string(classDecl.Name[0])) + classDecl.Name[1:] + symbol.ToGoName(memberName, true)
+					return pkgPrefix + strings.ToLower(string(classDecl.Name[0])) + classDecl.Name[1:] + symbol.ToGoName(memberName, true)
 				}
 			}
 		}
 	}
 
-	// 默认使用公开格式
-	return goClassName + symbol.ToGoName(memberName, true)
+	// 默认使用公开格式（带包前缀）
+	return pkgPrefix + goClassName + symbol.ToGoName(memberName, true)
 }
 
 // generateTypeAssertExpr 生成类型断言表达式

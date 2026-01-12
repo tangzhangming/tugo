@@ -21,6 +21,7 @@ type Transpiler struct {
 	config         *config.Config                     // 项目配置
 	typeImports    map[string]string                  // 类型名到包名的映射 (User -> models)
 	currentFile    string                             // 当前文件名（不含路径和后缀）
+	skipValidation bool                               // 跳过顶层语句验证（用于标准库）
 }
 
 // New 创建一个新的转译器
@@ -39,6 +40,11 @@ func New(table *symbol.Table) *Transpiler {
 // SetConfig 设置项目配置
 func (t *Transpiler) SetConfig(cfg *config.Config) {
 	t.config = cfg
+}
+
+// SetSkipValidation 设置是否跳过顶层语句验证（用于标准库）
+func (t *Transpiler) SetSkipValidation(skip bool) {
+	t.skipValidation = skip
 }
 
 // GetConfig 获取项目配置
@@ -77,12 +83,14 @@ func (t *Transpiler) TranspileFileWithName(file *parser.File, fileName string) (
 		}
 	}
 
-	// 验证顶层语句（禁止类外的 func/const/var）
-	t.validateTopLevelStatements(file)
+	// 验证顶层语句（禁止类外的 func/const/var）- 标准库跳过
+	if !t.skipValidation {
+		t.validateTopLevelStatements(file)
 
-	// 验证文件命名规则（public class/interface 必须与文件名一致）
-	if fileName != "" {
-		t.validateFileNaming(file, fileName)
+		// 验证文件命名规则（public class/interface 必须与文件名一致）
+		if fileName != "" {
+			t.validateFileNaming(file, fileName)
+		}
 	}
 
 	// 校验 implements、extends 和 static class

@@ -1,64 +1,66 @@
 package lang
 
+import "strings" from golang
+
 // Str 字符串工具类
 public static class Str {
     // Contains 检查字符串是否包含子串
-    public func Contains(s:string, substr:string) bool {
+    public static func Contains(s:string, substr:string) bool {
         return strings.Contains(s, substr)
     }
 
     // HasPrefix 检查字符串是否以指定前缀开头
-    public func HasPrefix(s:string, prefix:string) bool {
+    public static func HasPrefix(s:string, prefix:string) bool {
         return strings.HasPrefix(s, prefix)
     }
 
     // HasSuffix 检查字符串是否以指定后缀结尾
-    public func HasSuffix(s:string, suffix:string) bool {
+    public static func HasSuffix(s:string, suffix:string) bool {
         return strings.HasSuffix(s, suffix)
     }
 
     // ToUpper 将字符串转为大写
-    public func ToUpper(s:string) string {
+    public static func ToUpper(s:string) string {
         return strings.ToUpper(s)
     }
 
     // ToLower 将字符串转为小写
-    public func ToLower(s:string) string {
+    public static func ToLower(s:string) string {
         return strings.ToLower(s)
     }
 
     // Trim 去除字符串两端的空白字符
-    public func Trim(s:string) string {
+    public static func Trim(s:string) string {
         return strings.TrimSpace(s)
     }
 
     // Replace 替换字符串
-    public func Replace(s:string, old:string, new:string) string {
-        return strings.ReplaceAll(s, old, new)
+    public static func Replace(s:string, old:string, newStr:string) string {
+        return strings.ReplaceAll(s, old, newStr)
     }
 
     // Split 分割字符串
-    public func Split(s:string, sep:string) []string {
+    public static func Split(s:string, sep:string) []string {
         return strings.Split(s, sep)
     }
 
     // Join 连接字符串切片
-    public func Join(elems:[]string, sep:string) string {
+    public static func Join(elems:[]string, sep:string) string {
         return strings.Join(elems, sep)
     }
 
     // Length 获取字符串长度
-    public func Length(s:string) int {
+    public static func Length(s:string) int {
         return len(s)
     }
 
     // IsEmpty 检查字符串是否为空
-    public func IsEmpty(s:string) bool {
+    public static func IsEmpty(s:string) bool {
         return len(s) == 0
     }
 
     // IsBlank 检查字符串是否为空白（空或只有空白字符）
-    public func IsBlank(s:string) bool {
+    public static func IsBlank(s:string) bool {
         return len(strings.TrimSpace(s)) == 0
     }
 }
