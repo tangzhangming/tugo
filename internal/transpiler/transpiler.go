@@ -987,6 +987,14 @@ func (t *Transpiler) validateSymbolsInExpr(expr parser.Expression, importedTypes
 		t.validateSymbolsInExpr(e.Index, importedTypes, definedTypes)
 	case *parser.SelectorExpr:
 		t.validateSymbolsInExpr(e.X, importedTypes, definedTypes)
+	case *parser.StaticAccessExpr:
+		// 静态访问 Str::ToUpper, 检查类名是否已导入或定义
+		if ident, ok := e.Left.(*parser.Identifier); ok {
+			typeName := ident.Value
+			if !importedTypes[typeName] && !definedTypes[typeName] && !t.isBuiltinType(typeName) {
+				t.errors = append(t.errors, i18n.T(i18n.ErrUndefinedType, typeName))
+			}
+		}
 	}
 }
 
