@@ -1,8 +1,7 @@
 package parser
 
 import (
-	"fmt"
-
+	"github.com/tangzhangming/tugo/internal/i18n"
 	"github.com/tangzhangming/tugo/internal/lexer"
 )
 
@@ -60,7 +59,7 @@ func (p *Parser) expectPeek(t lexer.TokenType) bool {
 
 // peekError 记录期望错误
 func (p *Parser) peekError(t lexer.TokenType) {
-	msg := fmt.Sprintf("line %d:%d: expected %s, got %s",
+	msg := i18n.T(i18n.ErrExpectedToken,
 		p.peekToken.Line, p.peekToken.Column,
 		lexer.TokenTypeName(t), lexer.TokenTypeName(p.peekToken.Type))
 	p.errors = append(p.errors, msg)
@@ -68,7 +67,7 @@ func (p *Parser) peekError(t lexer.TokenType) {
 
 // addError 添加错误
 func (p *Parser) addError(msg string) {
-	p.errors = append(p.errors, fmt.Sprintf("line %d:%d: %s",
+	p.errors = append(p.errors, i18n.T(i18n.ErrGeneric,
 		p.curToken.Line, p.curToken.Column, msg))
 }
 

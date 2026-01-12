@@ -699,6 +699,501 @@ import "tugo.lang.Str"
 
 ---
 
+## 12. 错误处理 (Error Handling)
+
+Tugo 采用 Nature-lang 风格的错误处理机制，提供比 Go 更简洁的错误处理语法，同时保持类型安全。
+
+### 12.1 Errable 函数声明 (`!`)
+
+使用 `!` 标记函数可能抛出错误，翻译为返回 `error` 的 Go 函数。
+
+#### 语法
+
+```tugo
+// 单返回值 + 错误
+func divide(a int, b int) int! {
+    if b == 0 {
+        throw errorf("division by zero")
+    }
+    return a / b
+}
+
+// 多返回值 + 错误
+func getData() (int, string)! {
+    if someError {
+        throw errorf("failed to get data")
+    }
+    return 42, "hello"
+}
+
+// 无返回值 + 错误
+func process() void! {
+    if failed {
+        throw errorf("process failed")
+    }
+}
+```
+
+#### 翻译规则
+
+| Tugo | Go |
+|------|-----|
+| `func foo() int!` | `func foo() (int, error)` |
+| `func bar() (int, string)!` | `func bar() (int, string, error)` |
+| `func baz() void!` | `func baz() error` |
+
+### 12.2 throw 语句
+
+使用 `throw` 抛出错误，必须在 errable 函数中使用。
+
+#### 语法
+
+```tugo
+func validate(age int) void! {
+    if age < 0 {
+        throw errorf("age cannot be negative: %d", age)
+    }
+    if age > 150 {
+        throw errorf("age is too large: %d", age)
+    }
+}
+```
+
+#### 翻译结果
+
+```go
+func validate(age int) error {
+    if age < 0 {
+        return fmt.Errorf("age cannot be negative: %d", age)
+    }
+    if age > 150 {
+        return fmt.Errorf("age is too large: %d", age)
+    }
+    return nil
+}
+```
+
+### 12.3 try-catch 块
+
+使用 `try-catch` 捕获和处理错误。
+
+#### 基本语法
+
+```tugo
+try {
+    result := divide(10, 0)
+    println("Result:", result)
+} catch e {
+    println("Error:", e.Error())
+}
+```
+
+#### 翻译结果
+
+```go
+{
+    var _tryErr_1 error
+    _TryBlock_1:
+    for _once := true; _once; _once = false {
+        result, _err := divide(10, 0)
+        if _err != nil {
+            _tryErr_1 = _err
+            break _TryBlock_1
+        }
+        fmt.Println("Result:", result)
+    }
+    if _tryErr_1 != nil {
+        e := _tryErr_1
+        fmt.Println("Error:", e.Error())
+    }
+}
+```
+
+### 12.4 自动错误传播
+
+在 errable 函数中调用其他 errable 函数时，错误会自动向上传播。
+
+#### 示例
+
+```tugo
+func getUser(id int) string! {
+    // validate 是 errable 函数，错误自动传播
+    validate(id)
+    return "User-" + id
+}
+
+func validate(id int) void! {
+    if id < 0 {
+        throw errorf("invalid id: %d", id)
+    }
+}
+```
+
+#### 翻译结果
+
+```go
+func getUser(id int) (string, error) {
+    // 自动生成错误检查和传播代码
+    _, err := validate(id)
+    if err != nil {
+        return "", err  // 返回零值 + 错误
+    }
+    return "User-" + strconv.Itoa(id), nil
+}
+
+func validate(id int) error {
+    if id < 0 {
+        return fmt.Errorf("invalid id: %d", id)
+    }
+    return nil
+}
+```
+
+### 12.5 多返回值支持
+
+Errable 函数可以返回多个值，在 try 块中会自动展开。
+
+#### 单值接收
+
+```tugo
+func getName() (int, string)! {
+    return 1, "Alice"
+}
+
+try {
+    id, name := getName()  // 正确：接收所有返回值
+    println(id, name)
+} catch e {
+    println(e.Error())
+}
+```
+
+#### 忽略部分返回值
+
+```tugo
+try {
+    _, name := getName()  // 正确：忽略 id
+    println(name)
+} catch e {
+    println(e.Error())
+}
+```
+
+#### 嵌套调用自动展开
+
+```tugo
+try {
+    // getName() 返回两个值，会自动展开为多个参数
+    println("Data:", getName())  // 输出: Data: 1 Alice
+} catch e {
+    println(e.Error())
+}
+```
+
+翻译为：
+
+```go
+_tmp1, _tmp2, _err := getName()
+if _err != nil {
+    _tryErr = _err
+    break _TryBlock
+}
+fmt.Println("Data:", _tmp1, _tmp2)
+```
+
+### 12.6 errorf 内置函数
+
+`errorf()` 是 Tugo 内置函数，自动翻译为 `fmt.Errorf()`，无需手动导入 `fmt`。
+
+#### 语法
+
+```tugo
+func process(val int) void! {
+    if val < 0 {
+        throw errorf("negative value: %d", val)
+    }
+    if val > 100 {
+        throw errorf("value too large: %d", val)
+    }
+}
+```
+
+#### 翻译结果
+
+```go
+import "fmt"  // 自动添加导入
+
+func process(val int) error {
+    if val < 0 {
+        return fmt.Errorf("negative value: %d", val)
+    }
+    if val > 100 {
+        return fmt.Errorf("value too large: %d", val)
+    }
+    return nil
+}
+```
+
+### 12.7 编译时验证
+
+Tugo 在编译时执行严格的错误处理验证。
+
+#### 规则 1：Errable 函数必须处理或传播错误
+
+```tugo
+// ✅ 正确：使用 try-catch 处理
+func good1() {
+    try {
+        divide(10, 0)
+    } catch e {
+        println(e.Error())
+    }
+}
+
+// ✅ 正确：在 errable 函数中自动传播
+func good2() void! {
+    divide(10, 0)  // 错误自动向上抛
+}
+
+// ❌ 错误：既未处理也未传播
+func bad() {
+    divide(10, 0)  // 编译错误！
+}
+```
+
+#### 规则 2：多返回值不能用在单值上下文
+
+```tugo
+func getData() (int, string)! {
+    return 1, "test"
+}
+
+// ❌ 错误：多返回值不能直接用作单个参数（非 try 块）
+func bad() {
+    x := getData()  // 编译错误
+}
+
+// ✅ 正确：在 try 块中自动展开
+try {
+    println(getData())  // 自动展开为多个参数
+} catch e {
+    println(e.Error())
+}
+
+// ✅ 正确：显式接收所有返回值
+try {
+    id, name := getData()
+    println(id, name)
+} catch e {
+    println(e.Error())
+}
+```
+
+#### 规则 3：未使用的导入
+
+```tugo
+import "com.example.models.User"
+
+// 如果没有使用 User，编译时报错
+// Error: imported type 'User' is not used
+```
+
+#### 规则 4：未定义的类型
+
+```tugo
+func test() {
+    user := new User()  // 如果未 import User，编译报错
+    // Error: undefined type 'User'
+}
+```
+
+### 12.8 完整示例
+
+#### 示例 1：基本错误处理
+
+```tugo
+package main
+
+public class Calculator {
+    public static func main() {
+        try {
+            result := divide(10, 2)
+            println("10 / 2 =", result)
+            
+            result2 := divide(10, 0)  // 会抛出错误
+            println("10 / 0 =", result2)
+        } catch e {
+            println("Caught error:", e.Error())
+        }
+    }
+    
+    func divide(a int, b int) int! {
+        if b == 0 {
+            throw errorf("division by zero")
+        }
+        return a / b
+    }
+}
+```
+
+输出：
+```
+10 / 2 = 5
+Caught error: division by zero
+```
+
+#### 示例 2：多层错误传播
+
+```tugo
+package main
+
+public class UserService {
+    public static func main() {
+        try {
+            user := getUser(123)
+            println("User:", user)
+        } catch e {
+            println("Error:", e.Error())
+        }
+    }
+    
+    func getUser(id int) string! {
+        validate(id)  // 错误自动传播
+        return "User-" + id
+    }
+    
+    func validate(id int) void! {
+        if id < 0 {
+            throw errorf("invalid user id: %d", id)
+        }
+        if id > 1000 {
+            throw errorf("user id too large: %d", id)
+        }
+    }
+}
+```
+
+#### 示例 3：多返回值处理
+
+```tugo
+package models
+
+public class Role {
+    public name string
+    public level int
+    
+    public func init(name:string="Guest", level:int=1) {
+        this.name = name
+        this.level = level
+    }
+    
+    // 返回多个值 + 错误
+    public func getInfo() (string, int)! {
+        if this.level < 0 {
+            throw errorf("invalid level: %d", this.level)
+        }
+        return this.name, this.level
+    }
+}
+```
+
+使用：
+
+```tugo
+package main
+
+import "models.Role"
+
+public class Application {
+    public static func main() {
+        role := new Role("Admin", 5)
+        
+        try {
+            // 多返回值自动展开
+            println("Role info:", role.getInfo())
+            
+            // 或显式接收
+            name, level := role.getInfo()
+            println("Name:", name, "Level:", level)
+        } catch e {
+            println("Error:", e.Error())
+        }
+    }
+}
+```
+
+### 12.9 与 Go 错误处理的对比
+
+| 特性 | Tugo | Go |
+|------|------|-----|
+| 错误函数标记 | `func foo() int!` | 无，需要手动声明 `(int, error)` |
+| 抛出错误 | `throw errorf("msg")` | `return 0, fmt.Errorf("msg")` |
+| 捕获错误 | `try-catch` | `if err != nil { ... }` |
+| 错误传播 | 自动 | 手动 `if err != nil { return ..., err }` |
+| 零值处理 | 自动生成 | 手动指定 |
+| 类型安全 | 编译时检查 | 运行时检查（部分） |
+
+### 12.10 最佳实践
+
+#### 1. 合理使用 errable 标记
+
+```tugo
+// ✅ 好：可能失败的操作标记为 errable
+func readFile(path string) string! {
+    // 文件可能不存在
+}
+
+// ✅ 好：纯计算不标记
+func add(a int, b int) int {
+    return a + b
+}
+```
+
+#### 2. 错误信息要清晰
+
+```tugo
+// ✅ 好：包含上下文信息
+throw errorf("failed to read file: %s", filename)
+
+// ❌ 差：信息不明确
+throw errorf("error")
+```
+
+#### 3. 在边界处使用 try-catch
+
+```tugo
+// ✅ 好：在应用入口或关键边界处捕获
+public static func main() {
+    try {
+        run()
+    } catch e {
+        println("Application error:", e.Error())
+    }
+}
+
+// ❌ 差：过度使用 try-catch
+func process() {
+    try {
+        step1()
+    } catch e1 {
+        // ...
+    }
+    try {
+        step2()
+    } catch e2 {
+        // ...
+    }
+}
+
+// ✅ 更好：让错误向上传播
+func process() void! {
+    step1()
+    step2()
+}
+```
+
+---
+
 ## 关键字总览
 
 | 关键字 | 用途 |
@@ -716,3 +1211,8 @@ import "tugo.lang.Str"
 | `implements` | 声明接口实现（class 和 struct）|
 | `::` | 静态成员访问运算符 |
 | `from` | 指定导入来源 (与 `import` 配合) |
+| `!` | 标记 errable 函数（可能抛出错误） |
+| `try` | 错误捕获块开始 |
+| `catch` | 错误处理块 |
+| `throw` | 抛出错误 |
+| `errorf` | 创建格式化错误（内置函数） |

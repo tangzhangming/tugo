@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/tangzhangming/tugo/internal/i18n"
 	"github.com/tangzhangming/tugo/internal/parser"
 	"github.com/tangzhangming/tugo/internal/symbol"
 )
@@ -1937,8 +1938,7 @@ func (g *CodeGen) generateTryBlockStatement(stmt parser.Statement, labelName str
 				// 变量数量不匹配，可能有 _ 忽略符，这是允许的
 				// 但不能超过返回值数量
 				if len(s.Names) > resultCount {
-					g.transpiler.errors = append(g.transpiler.errors, fmt.Sprintf(
-						"too many variables: function returns %d values but trying to assign to %d variables",
+					g.transpiler.errors = append(g.transpiler.errors, i18n.T(i18n.ErrTooManyVariables,
 						resultCount, len(s.Names)))
 					g.generateStatement(s)
 					return
@@ -2014,8 +2014,7 @@ func (g *CodeGen) generateTryBlockStatement(stmt parser.Statement, labelName str
 			
 			if resultCount > 1 {
 				// 多返回值函数不能直接作为表达式语句，需要接收返回值
-				g.transpiler.errors = append(g.transpiler.errors, fmt.Sprintf(
-					"errable function with %d return values cannot be used as expression statement, must assign to variables",
+				g.transpiler.errors = append(g.transpiler.errors, i18n.T(i18n.ErrErrableMultiReturnNoAssign,
 					resultCount))
 				g.generateStatement(s)
 				return

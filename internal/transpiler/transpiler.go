@@ -1,9 +1,8 @@
 package transpiler
 
 import (
-	"fmt"
-
 	"github.com/tangzhangming/tugo/internal/config"
+	"github.com/tangzhangming/tugo/internal/i18n"
 	"github.com/tangzhangming/tugo/internal/parser"
 	"github.com/tangzhangming/tugo/internal/symbol"
 )
@@ -303,8 +302,7 @@ func (t *Transpiler) validateImplements(classDecl *parser.ClassDecl) {
 		// 查找接口定义
 		ifaceInfo := t.table.GetInterface(t.pkg, ifaceName)
 		if ifaceInfo == nil {
-			t.errors = append(t.errors, fmt.Sprintf(
-				"class %s: interface %s not found",
+			t.errors = append(t.errors, i18n.T(i18n.ErrInterfaceNotFound,
 				classDecl.Name, ifaceName))
 			continue
 		}
@@ -313,8 +311,7 @@ func (t *Transpiler) validateImplements(classDecl *parser.ClassDecl) {
 		for _, ifaceMethod := range ifaceInfo.Methods {
 			classMethod, exists := classMethods[ifaceMethod.Name]
 			if !exists {
-				t.errors = append(t.errors, fmt.Sprintf(
-					"class %s does not implement interface %s: missing method %s",
+				t.errors = append(t.errors, i18n.T(i18n.ErrMissingMethod,
 					classDecl.Name, ifaceName, ifaceMethod.Name))
 				continue
 			}
@@ -331,15 +328,13 @@ func (t *Transpiler) validateImplements(classDecl *parser.ClassDecl) {
 func (t *Transpiler) validateMethodSignature(className, ifaceName string, method *parser.ClassMethod, sig *parser.FuncSignature) string {
 	// 检查参数数量
 	if len(method.Params) != len(sig.Params) {
-		return fmt.Sprintf(
-			"class %s method %s: parameter count mismatch (got %d, interface %s requires %d)",
+		return i18n.T(i18n.ErrParamCountMismatch,
 			className, method.Name, len(method.Params), ifaceName, len(sig.Params))
 	}
 
 	// 检查返回值数量
 	if len(method.Results) != len(sig.Results) {
-		return fmt.Sprintf(
-			"class %s method %s: return value count mismatch (got %d, interface %s requires %d)",
+		return i18n.T(i18n.ErrReturnCountMismatch,
 			className, method.Name, len(method.Results), ifaceName, len(sig.Results))
 	}
 
@@ -362,8 +357,7 @@ func (t *Transpiler) validateStructImplements(structDecl *parser.StructDecl) {
 		// 查找接口定义
 		ifaceInfo := t.table.GetInterface(t.pkg, ifaceName)
 		if ifaceInfo == nil {
-			t.errors = append(t.errors, fmt.Sprintf(
-				"struct %s: interface %s not found",
+			t.errors = append(t.errors, i18n.T(i18n.ErrStructInterfaceNotFound,
 				structDecl.Name, ifaceName))
 			continue
 		}
@@ -372,8 +366,7 @@ func (t *Transpiler) validateStructImplements(structDecl *parser.StructDecl) {
 		for _, ifaceMethod := range ifaceInfo.Methods {
 			structMethod, exists := structMethods[ifaceMethod.Name]
 			if !exists {
-				t.errors = append(t.errors, fmt.Sprintf(
-					"struct %s does not implement interface %s: missing method %s",
+				t.errors = append(t.errors, i18n.T(i18n.ErrStructMissingMethod,
 					structDecl.Name, ifaceName, ifaceMethod.Name))
 				continue
 			}
@@ -390,15 +383,13 @@ func (t *Transpiler) validateStructImplements(structDecl *parser.StructDecl) {
 func (t *Transpiler) validateStructMethodSignature(structName, ifaceName string, method *parser.ClassMethod, sig *parser.FuncSignature) string {
 	// 检查参数数量
 	if len(method.Params) != len(sig.Params) {
-		return fmt.Sprintf(
-			"struct %s method %s: parameter count mismatch (got %d, interface %s requires %d)",
+		return i18n.T(i18n.ErrStructParamMismatch,
 			structName, method.Name, len(method.Params), ifaceName, len(sig.Params))
 	}
 
 	// 检查返回值数量
 	if len(method.Results) != len(sig.Results) {
-		return fmt.Sprintf(
-			"struct %s method %s: return value count mismatch (got %d, interface %s requires %d)",
+		return i18n.T(i18n.ErrStructReturnMismatch,
 			structName, method.Name, len(method.Results), ifaceName, len(sig.Results))
 	}
 
@@ -410,16 +401,14 @@ func (t *Transpiler) validateExtends(classDecl *parser.ClassDecl) {
 	// 查找父类信息
 	parentInfo := t.table.GetClass(t.pkg, classDecl.Extends)
 	if parentInfo == nil {
-		t.errors = append(t.errors, fmt.Sprintf(
-			"class %s: parent class %s not found",
+		t.errors = append(t.errors, i18n.T(i18n.ErrParentClassNotFound,
 			classDecl.Name, classDecl.Extends))
 		return
 	}
 
 	// 父类必须是抽象类
 	if !parentInfo.Abstract {
-		t.errors = append(t.errors, fmt.Sprintf(
-			"class %s: cannot extend non-abstract class %s",
+		t.errors = append(t.errors, i18n.T(i18n.ErrExtendNonAbstract,
 			classDecl.Name, classDecl.Extends))
 		return
 	}
@@ -439,8 +428,7 @@ func (t *Transpiler) validateExtends(classDecl *parser.ClassDecl) {
 	for _, abstractMethod := range parentInfo.AbstractMethods {
 		childMethod, exists := childMethods[abstractMethod.Name]
 		if !exists {
-			t.errors = append(t.errors, fmt.Sprintf(
-				"class %s does not implement abstract method %s from parent class %s",
+			t.errors = append(t.errors, i18n.T(i18n.ErrAbstractMethodMissing,
 				classDecl.Name, abstractMethod.Name, classDecl.Extends))
 			continue
 		}
@@ -456,15 +444,13 @@ func (t *Transpiler) validateExtends(classDecl *parser.ClassDecl) {
 func (t *Transpiler) validateAbstractMethodSignature(className, parentName string, method *parser.ClassMethod, abstractMethod *parser.ClassMethod) string {
 	// 检查参数数量
 	if len(method.Params) != len(abstractMethod.Params) {
-		return fmt.Sprintf(
-			"class %s method %s: parameter count mismatch (got %d, abstract method in %s requires %d)",
+		return i18n.T(i18n.ErrAbstractParamMismatch,
 			className, method.Name, len(method.Params), parentName, len(abstractMethod.Params))
 	}
 
 	// 检查返回值数量
 	if len(method.Results) != len(abstractMethod.Results) {
-		return fmt.Sprintf(
-			"class %s method %s: return value count mismatch (got %d, abstract method in %s requires %d)",
+		return i18n.T(i18n.ErrAbstractReturnMismatch,
 			className, method.Name, len(method.Results), parentName, len(abstractMethod.Results))
 	}
 
@@ -475,17 +461,14 @@ func (t *Transpiler) validateAbstractMethodSignature(className, parentName strin
 func (t *Transpiler) validateStaticClass(classDecl *parser.ClassDecl) {
 	// 静态类不能有 init 构造函数
 	if classDecl.InitMethod != nil {
-		t.errors = append(t.errors, fmt.Sprintf(
-			"static class %s cannot have init constructor",
-			classDecl.Name))
+		t.errors = append(t.errors, i18n.T(i18n.ErrStaticClassInit, classDecl.Name))
 	}
 
 	// 静态类方法体内不能使用 this
 	for _, method := range classDecl.Methods {
 		if method.Body != nil {
 			if t.containsThis(method.Body) {
-				t.errors = append(t.errors, fmt.Sprintf(
-					"static class %s method %s cannot use 'this', use 'self::' instead",
+				t.errors = append(t.errors, i18n.T(i18n.ErrStaticClassThis,
 					classDecl.Name, method.Name))
 			}
 		}
@@ -590,22 +573,19 @@ func (t *Transpiler) validateTopLevelStatements(file *parser.File) {
 		case *parser.TypeDecl:
 			// 允许类型别名
 		case *parser.FuncDecl:
-			t.errors = append(t.errors, fmt.Sprintf(
-				"functions must be defined inside a class, found top-level function '%s'", s.Name))
+			t.errors = append(t.errors, i18n.T(i18n.ErrTopLevelFunction, s.Name))
 		case *parser.VarDecl:
 			names := ""
 			if len(s.Names) > 0 {
 				names = s.Names[0]
 			}
-			t.errors = append(t.errors, fmt.Sprintf(
-				"variables must be defined inside a class, found top-level variable '%s'", names))
+			t.errors = append(t.errors, i18n.T(i18n.ErrTopLevelVariable, names))
 		case *parser.ConstDecl:
 			names := ""
 			if len(s.Names) > 0 {
 				names = s.Names[0]
 			}
-			t.errors = append(t.errors, fmt.Sprintf(
-				"constants must be defined inside a class, found top-level constant '%s'", names))
+			t.errors = append(t.errors, i18n.T(i18n.ErrTopLevelConstant, names))
 		}
 	}
 }
@@ -633,21 +613,18 @@ func (t *Transpiler) validateFileNaming(file *parser.File, fileName string) {
 	// 检查数量
 	totalPublic := len(publicClasses) + len(publicInterfaces)
 	if totalPublic > 1 {
-		t.errors = append(t.errors, fmt.Sprintf(
-			"file '%s' has %d public classes/interfaces, only one is allowed",
+		t.errors = append(t.errors, i18n.T(i18n.ErrTooManyPublicTypes,
 			fileName, totalPublic))
 		return
 	}
 
 	// 检查名称是否与文件名一致
 	if len(publicClasses) == 1 && publicClasses[0] != fileName {
-		t.errors = append(t.errors, fmt.Sprintf(
-			"public class '%s' must be in file '%s.tugo', but found in '%s.tugo'",
+		t.errors = append(t.errors, i18n.T(i18n.ErrPublicClassFileName,
 			publicClasses[0], publicClasses[0], fileName))
 	}
 	if len(publicInterfaces) == 1 && publicInterfaces[0] != fileName {
-		t.errors = append(t.errors, fmt.Sprintf(
-			"public interface '%s' must be in file '%s.tugo', but found in '%s.tugo'",
+		t.errors = append(t.errors, i18n.T(i18n.ErrPublicIfaceFileName,
 			publicInterfaces[0], publicInterfaces[0], fileName))
 	}
 }
@@ -660,23 +637,19 @@ func (t *Transpiler) validateMainMethod(classDecl *parser.ClassDecl) {
 		if method.Name == "main" {
 			// 检查是否是 static
 			if !method.Static {
-				t.errors = append(t.errors, fmt.Sprintf(
-					"main method in class '%s' must be static", classDecl.Name))
+				t.errors = append(t.errors, i18n.T(i18n.ErrMainNotStatic, classDecl.Name))
 			}
 			// 检查是否是 public
 			if method.Visibility != "public" {
-				t.errors = append(t.errors, fmt.Sprintf(
-					"main method in class '%s' must be public", classDecl.Name))
+				t.errors = append(t.errors, i18n.T(i18n.ErrMainNotPublic, classDecl.Name))
 			}
 			// 检查参数
 			if len(method.Params) > 0 {
-				t.errors = append(t.errors, fmt.Sprintf(
-					"main method in class '%s' cannot have parameters", classDecl.Name))
+				t.errors = append(t.errors, i18n.T(i18n.ErrMainHasParams, classDecl.Name))
 			}
 			// 检查返回值
 			if len(method.Results) > 0 {
-				t.errors = append(t.errors, fmt.Sprintf(
-					"main method in class '%s' cannot have return values", classDecl.Name))
+				t.errors = append(t.errors, i18n.T(i18n.ErrMainHasReturns, classDecl.Name))
 			}
 			return
 		}
@@ -804,8 +777,7 @@ func (t *Transpiler) validateErrableCallsInExpr(funcName string, funcIsErrable b
 			if sym != nil && sym.Errable {
 				// 这是一个 errable 调用，检查是否被正确处理
 				if !inTryBlock && !funcIsErrable {
-					t.errors = append(t.errors, fmt.Sprintf(
-						"function %s: call to errable function '%s' must be inside a try block or current function must be errable",
+					t.errors = append(t.errors, i18n.T(i18n.ErrErrableNotHandled,
 						funcName, ident.Value))
 				}
 			}
@@ -818,8 +790,7 @@ func (t *Transpiler) validateErrableCallsInExpr(funcName string, funcIsErrable b
 				if sym.Kind == symbol.SymbolClassMethod || sym.Kind == symbol.SymbolMethod {
 					if sym.Name == methodName && sym.Errable {
 						if !inTryBlock && !funcIsErrable {
-							t.errors = append(t.errors, fmt.Sprintf(
-								"function %s: call to errable method '%s' must be inside a try block or current function must be errable",
+							t.errors = append(t.errors, i18n.T(i18n.ErrErrableMethodNotHandled,
 								funcName, methodName))
 						}
 						break
@@ -988,8 +959,7 @@ func (t *Transpiler) validateSymbolsInExpr(expr parser.Expression, importedTypes
 				typeName := ident.Value
 				// 检查类型是否已定义或导入
 				if !importedTypes[typeName] && !definedTypes[typeName] && !t.isBuiltinType(typeName) {
-					t.errors = append(t.errors, fmt.Sprintf(
-						"undefined type '%s': not imported or defined", typeName))
+					t.errors = append(t.errors, i18n.T(i18n.ErrUndefinedType, typeName))
 				}
 			}
 		} else {
@@ -1004,8 +974,7 @@ func (t *Transpiler) validateSymbolsInExpr(expr parser.Expression, importedTypes
 		if ident, ok := e.Type.(*parser.Identifier); ok {
 			typeName := ident.Value
 			if !importedTypes[typeName] && !definedTypes[typeName] && !t.isBuiltinType(typeName) {
-				t.errors = append(t.errors, fmt.Sprintf(
-					"undefined type '%s': not imported or defined", typeName))
+				t.errors = append(t.errors, i18n.T(i18n.ErrUndefinedType, typeName))
 			}
 		}
 	case *parser.BinaryExpr:
@@ -1068,8 +1037,7 @@ func (t *Transpiler) validateUnusedImports(file *parser.File) {
 	// 检查未使用的导入
 	for typeName, spec := range importedTypes {
 		if !usedTypes[typeName] {
-			t.errors = append(t.errors, fmt.Sprintf(
-				"imported type '%s' is not used (from %s)", typeName, spec.Path))
+			t.errors = append(t.errors, i18n.T(i18n.ErrUnusedImport, typeName, spec.Path))
 		}
 	}
 }
