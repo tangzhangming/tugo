@@ -133,7 +133,14 @@ func (t *Transpiler) TranspileFileWithName(file *parser.File, fileName string) (
 	}
 
 	gen := NewCodeGen(t)
-	return gen.Generate(file), nil
+	code := gen.Generate(file)
+	
+	// 再次检查代码生成阶段的错误
+	if len(t.errors) > 0 {
+		return "", &ImplementsError{Errors: t.errors}
+	}
+	
+	return code, nil
 }
 
 // GetCurrentFile 获取当前文件名

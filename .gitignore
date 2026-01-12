@@ -1,4 +1,5 @@
 *.exe
-/output/
+/.cursor/
 /.output/
 /examples/
+/output/

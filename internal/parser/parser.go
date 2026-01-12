@@ -1542,7 +1542,37 @@ func (p *Parser) parseExpressionStatement() Statement {
 		return nil
 	}
 
-	// 检查是否是短变量声明
+	// 检查是否是逗号分隔的表达式列表（用于多变量声明/赋值）
+	if p.peekTokenIs(lexer.TOKEN_COMMA) {
+		exprs := []Expression{expr}
+		for p.peekTokenIs(lexer.TOKEN_COMMA) {
+			p.nextToken() // 跳过逗号
+			p.nextToken() // 移到下一个表达式
+			nextExpr := p.parseExpression(LOWEST)
+			if nextExpr == nil {
+				break
+			}
+			exprs = append(exprs, nextExpr)
+		}
+		
+		// 现在检查是否是 := 或赋值
+		if p.peekTokenIs(lexer.TOKEN_DEFINE) {
+			// 多变量短声明
+			return p.parseMultiShortVarDecl(exprs)
+		}
+		
+		if p.peekTokenIs(lexer.TOKEN_ASSIGN) || p.peekTokenIs(lexer.TOKEN_PLUS_ASSIGN) ||
+			p.peekTokenIs(lexer.TOKEN_MINUS_ASSIGN) || p.peekTokenIs(lexer.TOKEN_ASTERISK_ASSIGN) ||
+			p.peekTokenIs(lexer.TOKEN_SLASH_ASSIGN) || p.peekTokenIs(lexer.TOKEN_PERCENT_ASSIGN) {
+			return p.parseMultiAssignStmt(exprs)
+		}
+		
+		// 否则是语法错误
+		p.addError("unexpected comma in expression")
+		return &ExpressionStmt{Expression: expr}
+	}
+
+	// 单个表达式，检查是否是短变量声明
 	if p.peekTokenIs(lexer.TOKEN_DEFINE) {
 		return p.parseShortVarDecl(expr)
 	}
@@ -1576,46 +1606,81 @@ func (p *Parser) parseExpressionStatement() Statement {
 	return &ExpressionStmt{Expression: expr}
 }
 
-// parseShortVarDecl 解析短变量声明
+// parseShortVarDecl 解析短变量声明（单变量）
 func (p *Parser) parseShortVarDecl(firstExpr Expression) *ShortVarDecl {
 	stmt := &ShortVarDecl{}
 
-	// 收集变量名
-	var exprs []Expression
-	exprs = append(exprs, firstExpr)
-
-	for p.peekTokenIs(lexer.TOKEN_COMMA) {
-		p.nextToken()
-		p.nextToken()
-		exprs = append(exprs, p.parseExpression(LOWEST))
+	// 提取变量名
+	if ident, ok := firstExpr.(*Identifier); ok {
+		stmt.Names = append(stmt.Names, ident.Value)
 	}
 
 	p.nextToken() // 跳过 :=
 	stmt.Token = p.curToken
 	p.nextToken()
 
-	// 提取变量名
+	stmt.Value = p.parseExpression(LOWEST)
+
+	return stmt
+}
+
+// parseMultiShortVarDecl 解析多变量短声明
+func (p *Parser) parseMultiShortVarDecl(exprs []Expression) *ShortVarDecl {
+	stmt := &ShortVarDecl{}
+
+	// 提取所有变量名
 	for _, e := range exprs {
 		if ident, ok := e.(*Identifier); ok {
 			stmt.Names = append(stmt.Names, ident.Value)
 		}
 	}
 
-	stmt.Value = p.parseExpression(LOWEST)
+	p.nextToken() // 跳过 :=
+	stmt.Token = p.curToken
+	p.nextToken()
+
+	// 解析右侧的值（可能是单个函数调用返回多值，或多个表达式）
+	firstValue := p.parseExpression(LOWEST)
+	
+	// 检查是否有更多值（逗号分隔）
+	if p.peekTokenIs(lexer.TOKEN_COMMA) {
+		// 多个值：a, b := 1, 2
+		// 创建一个元组表达式来包含所有值
+		values := []Expression{firstValue}
+		for p.peekTokenIs(lexer.TOKEN_COMMA) {
+			p.nextToken() // 跳过逗号
+			p.nextToken()
+			values = append(values, p.parseExpression(LOWEST))
+		}
+		
+		// 使用元组字面量来表示多个值
+		stmt.Value = &ArrayLiteral{Elements: values} // 临时用 ArrayLiteral 表示多值
+	} else {
+		// 单个值（可能是返回多值的函数调用）
+		stmt.Value = firstValue
+	}
 
 	return stmt
 }
 
-// parseAssignStmt 解析赋值语句
+// parseAssignStmt 解析赋值语句（单变量）
 func (p *Parser) parseAssignStmt(firstExpr Expression) *AssignStmt {
 	stmt := &AssignStmt{}
 	stmt.Left = append(stmt.Left, firstExpr)
 
-	for p.peekTokenIs(lexer.TOKEN_COMMA) {
-		p.nextToken()
-		p.nextToken()
-		stmt.Left = append(stmt.Left, p.parseExpression(LOWEST))
-	}
+	p.nextToken()
+	stmt.Token = p.curToken
+	p.nextToken()
+
+	stmt.Right = append(stmt.Right, p.parseExpression(LOWEST))
+
+	return stmt
+}
+
+// parseMultiAssignStmt 解析多变量赋值语句
+func (p *Parser) parseMultiAssignStmt(exprs []Expression) *AssignStmt {
+	stmt := &AssignStmt{}
+	stmt.Left = exprs
 
 	p.nextToken()
 	stmt.Token = p.curToken

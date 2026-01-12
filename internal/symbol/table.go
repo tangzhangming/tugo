@@ -24,14 +24,15 @@ const (
 
 // Symbol 表示一个符号
 type Symbol struct {
-	Name       string     // 原始名称
-	GoName     string     // 翻译后的 Go 名称
-	Kind       SymbolKind // 符号类型
-	Public     bool       // 是否公开
-	Package    string     // 所属包
-	Receiver   string     // 方法的接收者类型（仅用于方法）
-	HasDefault bool       // 函数是否有默认参数
-	Errable    bool       // 是否可能抛出错误（返回类型带 ! 标记）
+	Name        string     // 原始名称
+	GoName      string     // 翻译后的 Go 名称
+	Kind        SymbolKind // 符号类型
+	Public      bool       // 是否公开
+	Package     string     // 所属包
+	Receiver    string     // 方法的接收者类型（仅用于方法）
+	HasDefault  bool       // 函数是否有默认参数
+	Errable     bool       // 是否可能抛出错误（返回类型带 ! 标记）
+	ResultCount int        // 返回值数量（不包括error）
 }
 
 // InterfaceInfo 存储接口的完整信息
@@ -275,12 +276,13 @@ func (c *Collector) collectStatement(stmt parser.Statement) {
 // collectFunc 收集函数符号
 func (c *Collector) collectFunc(decl *parser.FuncDecl) {
 	sym := &Symbol{
-		Name:    decl.Name,
-		GoName:  ToGoName(decl.Name, decl.Public),
-		Kind:    SymbolFunc,
-		Public:  decl.Public,
-		Package: c.pkg,
-		Errable: decl.Errable,
+		Name:        decl.Name,
+		GoName:      ToGoName(decl.Name, decl.Public),
+		Kind:        SymbolFunc,
+		Public:      decl.Public,
+		Package:     c.pkg,
+		Errable:     decl.Errable,
+		ResultCount: len(decl.Results),
 	}
 
 	// 检查是否有默认参数
@@ -350,13 +352,14 @@ func (c *Collector) collectClass(decl *parser.ClassDecl) {
 	for _, method := range decl.Methods {
 		isPublic := method.Visibility == "public" || method.Visibility == "protected"
 		methodSym := &Symbol{
-			Name:     method.Name,
-			GoName:   ToGoName(method.Name, isPublic),
-			Kind:     SymbolClassMethod,
-			Public:   isPublic,
-			Package:  c.pkg,
-			Receiver: decl.Name,
-			Errable:  method.Errable,
+			Name:        method.Name,
+			GoName:      ToGoName(method.Name, isPublic),
+			Kind:        SymbolClassMethod,
+			Public:      isPublic,
+			Package:     c.pkg,
+			Receiver:    decl.Name,
+			Errable:     method.Errable,
+			ResultCount: len(method.Results),
 		}
 
 		// 检查是否有默认参数
@@ -374,13 +377,14 @@ func (c *Collector) collectClass(decl *parser.ClassDecl) {
 	for _, method := range decl.AbstractMethods {
 		isPublic := method.Visibility == "public" || method.Visibility == "protected"
 		methodSym := &Symbol{
-			Name:     method.Name,
-			GoName:   ToGoName(method.Name, isPublic),
-			Kind:     SymbolClassMethod,
-			Public:   isPublic,
-			Package:  c.pkg,
-			Receiver: decl.Name,
-			Errable:  method.Errable,
+			Name:        method.Name,
+			GoName:      ToGoName(method.Name, isPublic),
+			Kind:        SymbolClassMethod,
+			Public:      isPublic,
+			Package:     c.pkg,
+			Receiver:    decl.Name,
+			Errable:     method.Errable,
+			ResultCount: len(method.Results),
 		}
 		c.table.Add(methodSym)
 	}

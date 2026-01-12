@@ -1644,7 +1644,20 @@ func (g *CodeGen) generateShortVarDecl(decl *parser.ShortVarDecl) {
 		names[i] = symbol.TransformDollarVar(name)
 	}
 
-	g.writeLine(strings.Join(names, ", ") + " := " + g.generateExpression(decl.Value))
+	// 检查Value是否是临时的ArrayLiteral（表示多值）
+	if arrLit, ok := decl.Value.(*parser.ArrayLiteral); ok && len(decl.Names) > 1 {
+		// 多值赋值：a, b := 1, 2
+		var values []string
+		for _, elem := range arrLit.Elements {
+			values = append(values, g.generateExpression(elem))
+		}
+		line := fmt.Sprintf("%s := %s", strings.Join(names, ", "), strings.Join(values, ", "))
+		g.writeLine(line)
+	} else {
+		// 单值或函数调用
+		line := fmt.Sprintf("%s := %s", strings.Join(names, ", "), g.generateExpression(decl.Value))
+		g.writeLine(line)
+	}
 }
 
 // generateAssignStmt 生成赋值语句
@@ -1777,7 +1790,8 @@ func (g *CodeGen) generateTryStmt(stmt *parser.TryStmt) {
 
 	// 生成 try 块中的语句
 	// 这里需要特殊处理，为 errable 调用插入错误检查
-	g.generateTryBlockStatements(stmt.Body.Statements, labelName, errVarName)
+	tmpCounter := 0
+	g.generateTryBlockStatements(stmt.Body.Statements, labelName, errVarName, &tmpCounter)
 
 	g.inTryBlock = oldInTryBlock
 	g.indent--
@@ -1810,29 +1824,44 @@ func (g *CodeGen) generateTryStmt(stmt *parser.TryStmt) {
 }
 
 // generateTryBlockStatements 生成 try 块中的语句，为 errable 调用插入错误检查
-func (g *CodeGen) generateTryBlockStatements(statements []parser.Statement, labelName string, errVarName string) {
+func (g *CodeGen) generateTryBlockStatements(statements []parser.Statement, labelName string, errVarName string, tmpCounter *int) {
 	for _, stmt := range statements {
-		g.generateTryBlockStatement(stmt, labelName, errVarName)
+		g.generateTryBlockStatement(stmt, labelName, errVarName, tmpCounter)
 	}
 }
 
 // generateTryBlockStatement 生成 try 块中的单个语句
-func (g *CodeGen) generateTryBlockStatement(stmt parser.Statement, labelName string, errVarName string) {
+func (g *CodeGen) generateTryBlockStatement(stmt parser.Statement, labelName string, errVarName string, tmpCounter *int) {
 	switch s := stmt.(type) {
 	case *parser.ShortVarDecl:
-		// 短变量声明：a := errableFunc()
+		// 短变量声明：a, b := errableFunc()
 		// 需要检查右侧是否是 errable 调用
 		if g.isErrableCall(s.Value) {
+			// 获取函数返回值数量
+			resultCount := g.getErrableFuncResultCount(s.Value.(*parser.CallExpr))
+			
+			// 检查用户接收的变量数量是否匹配
+			if len(s.Names) != resultCount {
+				// 变量数量不匹配，可能有 _ 忽略符，这是允许的
+				// 但不能超过返回值数量
+				if len(s.Names) > resultCount {
+					g.transpiler.errors = append(g.transpiler.errors, fmt.Sprintf(
+						"too many variables: function returns %d values but trying to assign to %d variables",
+						resultCount, len(s.Names)))
+					g.generateStatement(s)
+					return
+				}
+			}
+			
 			// 生成带错误检查的调用
 			names := make([]string, len(s.Names))
 			for i, name := range s.Names {
 				names[i] = symbol.TransformDollarVar(name)
 			}
-			g.writeIndent()
-			g.write(strings.Join(names, ", "))
-			g.write(", _err := ")
-			g.write(g.generateExpression(s.Value))
-			g.write("\n")
+			
+			// 追加 _err
+			line := fmt.Sprintf("%s, _err := %s", strings.Join(names, ", "), g.generateExpression(s.Value))
+			g.writeLine(line)
 
 			// 插入错误检查
 			g.writeLine("if _err != nil {")
@@ -1885,11 +1914,28 @@ func (g *CodeGen) generateTryBlockStatement(stmt parser.Statement, labelName str
 			g.generateStatement(s)
 		}
 	case *parser.ExpressionStmt:
-		// 表达式语句：可能是单独的函数调用
+		// 表达式语句：可能是单独的函数调用或包含嵌套 errable 调用
 		if g.isErrableCall(s.Expression) {
-			// 生成带错误检查的调用
+			// 顶层就是 errable 调用
+			call := s.Expression.(*parser.CallExpr)
+			resultCount := g.getErrableFuncResultCount(call)
+			
+			if resultCount > 1 {
+				// 多返回值函数不能直接作为表达式语句，需要接收返回值
+				g.transpiler.errors = append(g.transpiler.errors, fmt.Sprintf(
+					"errable function with %d return values cannot be used as expression statement, must assign to variables",
+					resultCount))
+				g.generateStatement(s)
+				return
+			}
+			
+			// 单返回值，生成带错误检查的调用
 			g.writeIndent()
-			g.write("_err := ")
+			if resultCount == 1 {
+				g.write("_, _err := ")
+			} else {
+				g.write("_err := ")
+			}
 			g.write(g.generateExpression(s.Expression))
 			g.write("\n")
 
@@ -1900,6 +1946,21 @@ func (g *CodeGen) generateTryBlockStatement(stmt parser.Statement, labelName str
 			g.writeLine(fmt.Sprintf("break %s", labelName))
 			g.indent--
 			g.writeLine("}")
+		} else if g.containsErrableCall(s.Expression) {
+			// 检查嵌套的 errable 调用是否返回多个值
+			if g.hasMultiValueErrableCall(s.Expression) {
+				g.transpiler.errors = append(g.transpiler.errors, 
+					"multi-value errable function cannot be used in nested expression, must assign to variables first")
+				g.generateStatement(s)
+				return
+			}
+			
+			// 包含嵌套的 errable 调用，需要提取
+			newExpr := g.extractErrableCalls(s.Expression, labelName, errVarName, tmpCounter)
+			// 生成替换后的表达式语句
+			g.writeIndent()
+			g.write(g.generateExpressionFromExtracted(newExpr))
+			g.write("\n")
 		} else {
 			g.generateStatement(s)
 		}
@@ -1919,11 +1980,12 @@ func (g *CodeGen) isErrableCall(expr parser.Expression) bool {
 				return true
 			}
 		} else if sel, ok := call.Function.(*parser.SelectorExpr); ok {
-			// 方法调用
+			// 方法调用（不区分大小写，因为tugo的getName会变成Go的GetName）
 			methodName := sel.Sel
+			methodNameLower := strings.ToLower(methodName)
 			for _, sym := range g.transpiler.table.GetAll() {
 				if (sym.Kind == symbol.SymbolClassMethod || sym.Kind == symbol.SymbolMethod) && 
-				   sym.Name == methodName && sym.Errable {
+				   strings.ToLower(sym.Name) == methodNameLower && sym.Errable {
 					return true
 				}
 			}
@@ -1963,6 +2025,164 @@ func (g *CodeGen) containsErrableCall(expr parser.Expression) bool {
 	}
 	
 	return false
+}
+
+// extractedExpr 表示提取后的表达式（临时变量名）
+type extractedExpr struct {
+	varName string
+}
+
+func (e *extractedExpr) TokenLiteral() string { return e.varName }
+func (e *extractedExpr) expressionNode()      {}
+
+// extractErrableCalls 递归提取 errable 调用，生成临时变量和错误检查
+// 返回替换后的表达式（errable 调用被替换为临时变量标识符）
+func (g *CodeGen) extractErrableCalls(expr parser.Expression, labelName, errVarName string, tmpCounter *int) parser.Expression {
+	if expr == nil {
+		return nil
+	}
+	
+	switch e := expr.(type) {
+	case *parser.CallExpr:
+		// 先检查当前调用是否是 errable
+		if g.isErrableCall(e) {
+			// 获取函数的返回值数量
+			resultCount := g.getErrableFuncResultCount(e)
+			
+			// 为每个返回值生成临时变量
+			var tmpVars []string
+			for i := 0; i < resultCount; i++ {
+				*tmpCounter++
+				tmpVars = append(tmpVars, fmt.Sprintf("_tmp%d", *tmpCounter))
+			}
+			
+			// 生成提取代码
+			g.writeIndent()
+			if len(tmpVars) > 0 {
+				g.write(strings.Join(tmpVars, ", "))
+				g.write(", _err := ")
+			} else {
+				g.write("_err := ")
+			}
+			g.write(g.generateExpression(e))
+			g.write("\n")
+			
+			// 生成错误检查
+			g.writeLine("if _err != nil {")
+			g.indent++
+			g.writeLine(fmt.Sprintf("%s = _err", errVarName))
+			g.writeLine(fmt.Sprintf("break %s", labelName))
+			g.indent--
+			g.writeLine("}")
+			
+			// 返回临时变量标识符（如果有多个，只返回第一个用于嵌套表达式）
+			if len(tmpVars) > 0 {
+				return &parser.Identifier{Value: tmpVars[0]}
+			}
+			return &parser.Identifier{Value: "_"}
+		}
+		
+		// 不是 errable，但参数中可能有 errable 调用
+		newArgs := make([]parser.Expression, len(e.Arguments))
+		for i, arg := range e.Arguments {
+			newArgs[i] = g.extractErrableCalls(arg, labelName, errVarName, tmpCounter)
+		}
+		
+		// 返回新的 CallExpr（参数被替换）
+		return &parser.CallExpr{
+			Function:  e.Function,
+			Arguments: newArgs,
+		}
+		
+	case *parser.BinaryExpr:
+		return &parser.BinaryExpr{
+			Left:     g.extractErrableCalls(e.Left, labelName, errVarName, tmpCounter),
+			Operator: e.Operator,
+			Right:    g.extractErrableCalls(e.Right, labelName, errVarName, tmpCounter),
+		}
+		
+	case *parser.UnaryExpr:
+		return &parser.UnaryExpr{
+			Operator: e.Operator,
+			Operand:  g.extractErrableCalls(e.Operand, labelName, errVarName, tmpCounter),
+		}
+		
+	default:
+		// 其他类型的表达式直接返回
+		return expr
+	}
+}
+
+// generateExpressionFromExtracted 生成提取后的表达式（可能包含临时变量）
+func (g *CodeGen) generateExpressionFromExtracted(expr parser.Expression) string {
+	if expr == nil {
+		return ""
+	}
+	
+	// 对于临时变量标识符，直接返回变量名
+	if ident, ok := expr.(*parser.Identifier); ok {
+		return ident.Value
+	}
+	
+	// 其他情况使用标准生成
+	return g.generateExpression(expr)
+}
+
+// hasMultiValueErrableCall 检查表达式中是否包含返回多值的 errable 调用
+func (g *CodeGen) hasMultiValueErrableCall(expr parser.Expression) bool {
+	if expr == nil {
+		return false
+	}
+	
+	if call, ok := expr.(*parser.CallExpr); ok {
+		if g.isErrableCall(call) {
+			return g.getErrableFuncResultCount(call) > 1
+		}
+		// 检查参数
+		for _, arg := range call.Arguments {
+			if g.hasMultiValueErrableCall(arg) {
+				return true
+			}
+		}
+	}
+	
+	// 递归检查子表达式
+	switch e := expr.(type) {
+	case *parser.BinaryExpr:
+		return g.hasMultiValueErrableCall(e.Left) || g.hasMultiValueErrableCall(e.Right)
+	case *parser.UnaryExpr:
+		return g.hasMultiValueErrableCall(e.Operand)
+	}
+	
+	return false
+}
+
+// getErrableFuncResultCount 获取 errable 函数的返回值数量（不包括 error）
+func (g *CodeGen) getErrableFuncResultCount(call *parser.CallExpr) int {
+	if ident, ok := call.Function.(*parser.Identifier); ok {
+		// 函数调用
+		funcName := ident.Value
+		sym := g.transpiler.table.Get(g.transpiler.pkg, funcName)
+		if sym != nil && sym.Errable {
+			return sym.ResultCount
+		}
+	} else if sel, ok := call.Function.(*parser.SelectorExpr); ok {
+		// 方法调用 obj.method()
+		methodName := sel.Sel
+		
+		// 尝试从所有类方法中查找（不区分大小写）
+		methodNameLower := strings.ToLower(methodName)
+		
+		for _, sym := range g.transpiler.table.GetAll() {
+			if (sym.Kind == symbol.SymbolClassMethod || sym.Kind == symbol.SymbolMethod) &&
+				strings.ToLower(sym.Name) == methodNameLower && sym.Errable {
+				return sym.ResultCount
+			}
+		}
+	}
+	
+	// 默认返回1（保守处理）
+	return 1
 }
 
 // generateIfStmt 生成 if 语句
