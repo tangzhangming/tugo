@@ -1961,6 +1961,11 @@ func (g *CodeGen) generateTryBlockStatement(stmt parser.Statement, labelName str
 		} else {
 			g.generateStatement(s)
 		}
+	case *parser.ThrowStmt:
+		// 在 try 块内的 throw，设置错误变量并 break
+		errorExpr := g.generateExpression(s.Value)
+		g.writeLine(fmt.Sprintf("%s = %s", errVarName, errorExpr))
+		g.writeLine(fmt.Sprintf("break %s", labelName))
 	default:
 		// 其他语句直接生成
 		g.generateStatement(s)
