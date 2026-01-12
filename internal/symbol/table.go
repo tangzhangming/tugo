@@ -31,6 +31,7 @@ type Symbol struct {
 	Package    string     // 所属包
 	Receiver   string     // 方法的接收者类型（仅用于方法）
 	HasDefault bool       // 函数是否有默认参数
+	Errable    bool       // 是否可能抛出错误（返回类型带 ! 标记）
 }
 
 // InterfaceInfo 存储接口的完整信息
@@ -279,6 +280,7 @@ func (c *Collector) collectFunc(decl *parser.FuncDecl) {
 		Kind:    SymbolFunc,
 		Public:  decl.Public,
 		Package: c.pkg,
+		Errable: decl.Errable,
 	}
 
 	// 检查是否有默认参数
@@ -354,6 +356,7 @@ func (c *Collector) collectClass(decl *parser.ClassDecl) {
 			Public:   isPublic,
 			Package:  c.pkg,
 			Receiver: decl.Name,
+			Errable:  method.Errable,
 		}
 
 		// 检查是否有默认参数
@@ -377,6 +380,7 @@ func (c *Collector) collectClass(decl *parser.ClassDecl) {
 			Public:   isPublic,
 			Package:  c.pkg,
 			Receiver: decl.Name,
+			Errable:  method.Errable,
 		}
 		c.table.Add(methodSym)
 	}
@@ -390,6 +394,7 @@ func (c *Collector) collectClass(decl *parser.ClassDecl) {
 			Public:   true,
 			Package:  c.pkg,
 			Receiver: decl.Name,
+			Errable:  decl.InitMethod.Errable,
 		}
 		for _, param := range decl.InitMethod.Params {
 			if param.DefaultValue != nil {

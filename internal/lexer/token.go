@@ -117,6 +117,11 @@ const (
 	TOKEN_EXTENDS    // extends
 	TOKEN_SELF       // self
 	TOKEN_FROM       // from (用于 import "fmt" from golang)
+
+	// 错误处理关键字
+	TOKEN_TRY   // try
+	TOKEN_CATCH // catch
+	TOKEN_THROW // throw
 )
 
 // Token 表示一个词法单元
@@ -173,6 +178,9 @@ var keywords = map[string]TokenType{
 	"extends":    TOKEN_EXTENDS,
 	"self":       TOKEN_SELF,
 	"from":       TOKEN_FROM,
+	"try":        TOKEN_TRY,
+	"catch":      TOKEN_CATCH,
+	"throw":      TOKEN_THROW,
 }
 
 // LookupIdent 查找标识符是否为关键字
@@ -265,6 +273,9 @@ func TokenTypeName(t TokenType) string {
 		TOKEN_EXTENDS:    "extends",
 		TOKEN_SELF:       "self",
 		TOKEN_FROM:       "from",
+		TOKEN_TRY:        "try",
+		TOKEN_CATCH:      "catch",
+		TOKEN_THROW:      "throw",
 	}
 	if name, ok := names[t]; ok {
 		return name

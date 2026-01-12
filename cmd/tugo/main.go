@@ -17,6 +17,12 @@ import (
 
 const version = "0.1.0"
 
+// 标准库配置常量
+const (
+	stdlibRelDir   = "src"      // 标准库相对 tugo.exe 的目录
+	stdlibPkgPrefix = "tugo."   // 标准库包前缀
+)
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -219,7 +225,7 @@ func getStdlibDir() (string, error) {
 		return "", err
 	}
 	exeDir := filepath.Dir(exePath)
-	stdlibDir := filepath.Join(exeDir, "src")
+	stdlibDir := filepath.Join(exeDir, stdlibRelDir)
 
 	// 检查目录是否存在
 	if _, err := os.Stat(stdlibDir); os.IsNotExist(err) {
@@ -254,10 +260,10 @@ func transpileStdlib(stdlibDir, outputDir string, tugoImports map[string]bool, v
 	vendorDir := filepath.Join(outputDir, "vendor")
 
 	for pkgPath := range tugoImports {
-		// tugo.lang -> lang/ (去掉 tugo. 前缀，因为标准库都在 src/ 下)
+		// tugo.lang -> lang/ (去掉标准库前缀，因为标准库都在 src/ 下)
 		srcRelPath := pkgPath
-		if strings.HasPrefix(srcRelPath, "tugo.") {
-			srcRelPath = srcRelPath[5:] // 去掉 "tugo."
+		if strings.HasPrefix(srcRelPath, stdlibPkgPrefix) {
+			srcRelPath = srcRelPath[len(stdlibPkgPrefix):] // 去掉前缀
 		}
 		srcRelPath = strings.ReplaceAll(srcRelPath, ".", string(filepath.Separator))
 		srcDir := filepath.Join(stdlibDir, srcRelPath)
@@ -563,8 +569,16 @@ func transpileFile(inputFile, outputPath string, verbose bool, cfg *config.Confi
 		}
 	}
 
+	// 生成 go.mod 文件
+	goModPath := filepath.Join(outputDir, "go.mod")
+	goModContent := fmt.Sprintf("module %s\n\ngo 1.21\n", cfg.Project.Module)
+	if err := os.WriteFile(goModPath, []byte(goModContent), 0644); err != nil {
+		return fmt.Errorf("cannot write go.mod: %w", err)
+	}
+
 	if verbose {
 		fmt.Println("Successfully transpiled")
+		fmt.Printf("Generated go.mod with module: %s\n", cfg.Project.Module)
 	}
 
 	return nil

@@ -1,5 +1,7 @@
 # tugo
 
+go build -o tugo.exe ./cmd/tugo
+
 # 运行单个文件
 tugo run examples\hello.tugo
 

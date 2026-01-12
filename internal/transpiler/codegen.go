@@ -22,6 +22,10 @@ type CodeGen struct {
 	typeToPackage      map[string]string    // 类型名到包名的映射 (User -> models)
 	goImports          map[string]bool      // Go 标准库导入
 	tugoImports        map[string]string    // tugo 包导入 (合并后) pkgPath -> pkgName
+	currentFuncErrable bool                 // 当前函数是否是 errable
+	currentFuncResults []*parser.Field      // 当前函数的返回值类型
+	tryCounter         int                  // try 块计数器（用于生成唯一标签）
+	inTryBlock         bool                 // 是否在 try 块内
 }
 
 // NewCodeGen 创建一个新的代码生成器
@@ -197,6 +201,17 @@ func (g *CodeGen) prescanStatement(stmt parser.Statement) {
 		for _, r := range s.Right {
 			g.prescanExpression(r)
 		}
+	case *parser.ThrowStmt:
+		if s.Value != nil {
+			g.prescanExpression(s.Value)
+		}
+	case *parser.TryStmt:
+		if s.Body != nil {
+			g.prescanBlock(s.Body)
+		}
+		if s.Catch != nil && s.Catch.Body != nil {
+			g.prescanBlock(s.Catch.Body)
+		}
 	}
 }
 
@@ -217,7 +232,7 @@ func (g *CodeGen) prescanExpression(expr parser.Expression) {
 		// 检查是否是全局函数调用
 		if ident, ok := e.Function.(*parser.Identifier); ok {
 			switch ident.Value {
-			case "print", "println", "print_f":
+			case "print", "println", "print_f", "errorf":
 				g.transpiler.SetNeedFmt(true)
 			}
 		}
@@ -310,6 +325,10 @@ func (g *CodeGen) generateStatement(stmt parser.Statement) {
 		g.generateAssignStmt(s)
 	case *parser.ReturnStmt:
 		g.generateReturnStmt(s)
+	case *parser.ThrowStmt:
+		g.generateThrowStmt(s)
+	case *parser.TryStmt:
+		g.generateTryStmt(s)
 	case *parser.IfStmt:
 		g.generateIfStmt(s)
 	case *parser.ForStmt:
@@ -382,19 +401,32 @@ func (g *CodeGen) generateFuncDecl(decl *parser.FuncDecl) {
 	// 返回值
 	if len(decl.Results) > 0 {
 		g.write(" ")
-		if len(decl.Results) == 1 && decl.Results[0].Name == "" {
+		if decl.Errable {
+			// errable 函数：追加 error 返回值
+			g.write("(")
+			g.generateParams(decl.Results)
+			g.write(", error)")
+		} else if len(decl.Results) == 1 && decl.Results[0].Name == "" {
 			g.write(g.generateType(decl.Results[0].Type))
 		} else {
 			g.write("(")
 			g.generateParams(decl.Results)
 			g.write(")")
 		}
+	} else if decl.Errable {
+		// 无返回值但是 errable：只返回 error
+		g.write(" error")
 	}
 
 	// 函数体
 	if decl.Body != nil {
 		g.write(" ")
+		// 设置当前函数是否是 errable 及返回类型
+		g.currentFuncErrable = decl.Errable
+		g.currentFuncResults = decl.Results
 		g.generateBlockStmtInline(decl.Body)
+		g.currentFuncErrable = false
+		g.currentFuncResults = nil
 	}
 	g.writeLine("")
 }
@@ -647,13 +679,21 @@ func (g *CodeGen) generateStructMethod(decl *parser.StructDecl, structName strin
 	// 返回值
 	if len(method.Results) > 0 {
 		g.write(" ")
-		if len(method.Results) == 1 && method.Results[0].Name == "" {
+		if method.Errable {
+			// errable 方法：追加 error 返回值
+			g.write("(")
+			g.generateParams(method.Results)
+			g.write(", error)")
+		} else if len(method.Results) == 1 && method.Results[0].Name == "" {
 			g.write(g.generateType(method.Results[0].Type))
 		} else {
 			g.write("(")
 			g.generateParams(method.Results)
 			g.write(")")
 		}
+	} else if method.Errable {
+		// 无返回值但是 errable：只返回 error
+		g.write(" error")
 	}
 
 	g.write(" ")
@@ -661,9 +701,13 @@ func (g *CodeGen) generateStructMethod(decl *parser.StructDecl, structName strin
 	// 方法体（翻译 this 为 s）
 	g.currentReceiver = "s"
 	g.currentStructDecl = decl
+	g.currentFuncErrable = method.Errable
+	g.currentFuncResults = method.Results
 	g.generateBlockStmt(method.Body)
 	g.currentReceiver = ""
 	g.currentStructDecl = nil
+	g.currentFuncErrable = false
+	g.currentFuncResults = nil
 }
 
 // generateClassDecl 生成类声明
@@ -1360,7 +1404,21 @@ func (g *CodeGen) generateClassMethodSimple(className, methodName string, method
 	// 返回值
 	if len(method.Results) > 0 {
 		g.write(" ")
-		if len(method.Results) == 1 && method.Results[0].Name == "" {
+		if method.Errable {
+			// errable 方法：追加 error 返回值
+			g.write("(")
+			for i, r := range method.Results {
+				if i > 0 {
+					g.write(", ")
+				}
+				if r.Name != "" {
+					g.write(symbol.TransformDollarVar(r.Name))
+					g.write(" ")
+				}
+				g.write(g.generateType(r.Type))
+			}
+			g.write(", error)")
+		} else if len(method.Results) == 1 && method.Results[0].Name == "" {
 			g.write(g.generateType(method.Results[0].Type))
 		} else {
 			g.write("(")
@@ -1376,6 +1434,9 @@ func (g *CodeGen) generateClassMethodSimple(className, methodName string, method
 			}
 			g.write(")")
 		}
+	} else if method.Errable {
+		// 无返回值但是 errable：只返回 error
+		g.write(" error")
 	}
 
 	g.writeLine(" {")
@@ -1384,10 +1445,14 @@ func (g *CodeGen) generateClassMethodSimple(className, methodName string, method
 	// 方法体
 	if method.Body != nil {
 		g.currentReceiver = "t"
+		g.currentFuncErrable = method.Errable
+		g.currentFuncResults = method.Results
 		for _, stmt := range method.Body.Statements {
 			g.generateStatement(stmt)
 		}
 		g.currentReceiver = ""
+		g.currentFuncErrable = false
+		g.currentFuncResults = nil
 	}
 
 	g.indent--
@@ -1433,7 +1498,21 @@ func (g *CodeGen) generateClassMethodWithDefaults(className, methodName string, 
 	// 返回值
 	if len(method.Results) > 0 {
 		g.write(" ")
-		if len(method.Results) == 1 && method.Results[0].Name == "" {
+		if method.Errable {
+			// errable 方法：追加 error 返回值
+			g.write("(")
+			for i, r := range method.Results {
+				if i > 0 {
+					g.write(", ")
+				}
+				if r.Name != "" {
+					g.write(symbol.TransformDollarVar(r.Name))
+					g.write(" ")
+				}
+				g.write(g.generateType(r.Type))
+			}
+			g.write(", error)")
+		} else if len(method.Results) == 1 && method.Results[0].Name == "" {
 			g.write(g.generateType(method.Results[0].Type))
 		} else {
 			g.write("(")
@@ -1449,6 +1528,9 @@ func (g *CodeGen) generateClassMethodWithDefaults(className, methodName string, 
 			}
 			g.write(")")
 		}
+	} else if method.Errable {
+		// 无返回值但是 errable：只返回 error
+		g.write(" error")
 	}
 
 	g.writeLine(" {")
@@ -1464,10 +1546,14 @@ func (g *CodeGen) generateClassMethodWithDefaults(className, methodName string, 
 	// 方法体
 	if method.Body != nil {
 		g.currentReceiver = "t"
+		g.currentFuncErrable = method.Errable
+		g.currentFuncResults = method.Results
 		for _, stmt := range method.Body.Statements {
 			g.generateStatement(stmt)
 		}
 		g.currentReceiver = ""
+		g.currentFuncErrable = false
+		g.currentFuncResults = nil
 	}
 
 	g.indent--
@@ -1579,7 +1665,12 @@ func (g *CodeGen) generateAssignStmt(stmt *parser.AssignStmt) {
 // generateReturnStmt 生成 return 语句
 func (g *CodeGen) generateReturnStmt(stmt *parser.ReturnStmt) {
 	if len(stmt.Values) == 0 {
-		g.writeLine("return")
+		if g.currentFuncErrable {
+			// errable 函数无返回值：return nil
+			g.writeLine("return nil")
+		} else {
+			g.writeLine("return")
+		}
 		return
 	}
 
@@ -1587,7 +1678,291 @@ func (g *CodeGen) generateReturnStmt(stmt *parser.ReturnStmt) {
 	for _, v := range stmt.Values {
 		values = append(values, g.generateExpression(v))
 	}
-	g.writeLine("return " + strings.Join(values, ", "))
+
+	if g.currentFuncErrable {
+		// 检查是否返回的是一个errable调用
+		// 如果只有一个返回值且是errable调用，则不追加nil（错误会自动传播）
+		if len(stmt.Values) == 1 && g.isErrableCall(stmt.Values[0]) {
+			g.writeLine("return " + strings.Join(values, ", "))
+		} else {
+			// errable 函数：追加 nil
+			g.writeLine("return " + strings.Join(values, ", ") + ", nil")
+		}
+	} else {
+		g.writeLine("return " + strings.Join(values, ", "))
+	}
+}
+
+// generateThrowStmt 生成 throw 语句
+func (g *CodeGen) generateThrowStmt(stmt *parser.ThrowStmt) {
+	// throw expr 翻译为 return zeroValues, expr
+	// 需要根据当前函数的返回值数量生成零值
+	errorExpr := g.generateExpression(stmt.Value)
+	
+	// 简化处理：假设当前在 errable 函数中
+	// 生成零值（可以根据实际返回类型优化）
+	g.writeLine("return " + g.generateZeroValues() + errorExpr)
+}
+
+// generateZeroValues 生成零值列表（用于 throw）
+func (g *CodeGen) generateZeroValues() string {
+	if len(g.currentFuncResults) == 0 {
+		return ""
+	}
+	
+	var zeroValues []string
+	for _, result := range g.currentFuncResults {
+		zeroValue := g.getTypeZeroValue(result.Type)
+		zeroValues = append(zeroValues, zeroValue)
+	}
+	
+	return strings.Join(zeroValues, ", ") + ", "
+}
+
+// getTypeZeroValue 根据类型返回零值
+func (g *CodeGen) getTypeZeroValue(typ parser.Expression) string {
+	if typ == nil {
+		return "nil"
+	}
+	
+	// 获取类型名称
+	typeName := ""
+	if ident, ok := typ.(*parser.Identifier); ok {
+		typeName = ident.Value
+	} else {
+		// 复杂类型（指针、切片、map等）默认返回 nil
+		return "nil"
+	}
+	
+	switch typeName {
+	case "int", "int8", "int16", "int32", "int64":
+		return "0"
+	case "uint", "uint8", "uint16", "uint32", "uint64":
+		return "0"
+	case "float32", "float64":
+		return "0.0"
+	case "bool":
+		return "false"
+	case "string":
+		return "\"\""
+	case "byte", "rune":
+		return "0"
+	default:
+		// 指针、接口、切片、map 等引用类型
+		return "nil"
+	}
+}
+
+// generateTryStmt 生成 try-catch 语句
+func (g *CodeGen) generateTryStmt(stmt *parser.TryStmt) {
+	g.tryCounter++
+	labelName := fmt.Sprintf("_TryBlock_%d", g.tryCounter)
+	errVarName := fmt.Sprintf("_tryErr_%d", g.tryCounter)
+
+	// 开始一个新的作用域
+	g.writeLine("{")
+	g.indent++
+
+	// 声明错误变量
+	g.writeLine(fmt.Sprintf("var %s error", errVarName))
+
+	// 生成 labeled for 循环
+	g.writeLine(fmt.Sprintf("%s:", labelName))
+	g.writeLine("for _once := true; _once; _once = false {")
+	g.indent++
+
+	// 设置 inTryBlock 标志
+	oldInTryBlock := g.inTryBlock
+	g.inTryBlock = true
+
+	// 生成 try 块中的语句
+	// 这里需要特殊处理，为 errable 调用插入错误检查
+	g.generateTryBlockStatements(stmt.Body.Statements, labelName, errVarName)
+
+	g.inTryBlock = oldInTryBlock
+	g.indent--
+	g.writeLine("}")
+
+	// 生成 catch 块
+	if stmt.Catch != nil {
+		g.writeLine(fmt.Sprintf("if %s != nil {", errVarName))
+		g.indent++
+
+		// 将错误赋值给 catch 参数
+		if stmt.Catch.Param != "" {
+			g.writeLine(fmt.Sprintf("%s := %s", stmt.Catch.Param, errVarName))
+		}
+
+		// 生成 catch 块体
+		if stmt.Catch.Body != nil {
+			for _, s := range stmt.Catch.Body.Statements {
+				g.generateStatement(s)
+			}
+		}
+
+		g.indent--
+		g.writeLine("}")
+	}
+
+	g.indent--
+	g.writeLine("}")
+	// tryCounter持续递增，不需要递减
+}
+
+// generateTryBlockStatements 生成 try 块中的语句，为 errable 调用插入错误检查
+func (g *CodeGen) generateTryBlockStatements(statements []parser.Statement, labelName string, errVarName string) {
+	for _, stmt := range statements {
+		g.generateTryBlockStatement(stmt, labelName, errVarName)
+	}
+}
+
+// generateTryBlockStatement 生成 try 块中的单个语句
+func (g *CodeGen) generateTryBlockStatement(stmt parser.Statement, labelName string, errVarName string) {
+	switch s := stmt.(type) {
+	case *parser.ShortVarDecl:
+		// 短变量声明：a := errableFunc()
+		// 需要检查右侧是否是 errable 调用
+		if g.isErrableCall(s.Value) {
+			// 生成带错误检查的调用
+			names := make([]string, len(s.Names))
+			for i, name := range s.Names {
+				names[i] = symbol.TransformDollarVar(name)
+			}
+			g.writeIndent()
+			g.write(strings.Join(names, ", "))
+			g.write(", _err := ")
+			g.write(g.generateExpression(s.Value))
+			g.write("\n")
+
+			// 插入错误检查
+			g.writeLine("if _err != nil {")
+			g.indent++
+			g.writeLine(fmt.Sprintf("%s = _err", errVarName))
+			g.writeLine(fmt.Sprintf("break %s", labelName))
+			g.indent--
+			g.writeLine("}")
+		} else {
+			g.generateStatement(s)
+		}
+	case *parser.AssignStmt:
+		// 赋值语句：检查右侧是否有 errable 调用
+		hasErrableCall := false
+		for _, expr := range s.Right {
+			if g.isErrableCall(expr) {
+				hasErrableCall = true
+				break
+			}
+		}
+
+		if hasErrableCall {
+			// 生成带错误检查的赋值
+			var left []string
+			for _, expr := range s.Left {
+				left = append(left, g.generateExpression(expr))
+			}
+
+			g.writeIndent()
+			g.write(strings.Join(left, ", "))
+			g.write(", _err ")
+			g.write(s.Token.Literal)
+			g.write(" ")
+
+			var right []string
+			for _, expr := range s.Right {
+				right = append(right, g.generateExpression(expr))
+			}
+			g.write(strings.Join(right, ", "))
+			g.write("\n")
+
+			// 插入错误检查
+			g.writeLine("if _err != nil {")
+			g.indent++
+			g.writeLine(fmt.Sprintf("%s = _err", errVarName))
+			g.writeLine(fmt.Sprintf("break %s", labelName))
+			g.indent--
+			g.writeLine("}")
+		} else {
+			g.generateStatement(s)
+		}
+	case *parser.ExpressionStmt:
+		// 表达式语句：可能是单独的函数调用
+		if g.isErrableCall(s.Expression) {
+			// 生成带错误检查的调用
+			g.writeIndent()
+			g.write("_err := ")
+			g.write(g.generateExpression(s.Expression))
+			g.write("\n")
+
+			// 插入错误检查
+			g.writeLine("if _err != nil {")
+			g.indent++
+			g.writeLine(fmt.Sprintf("%s = _err", errVarName))
+			g.writeLine(fmt.Sprintf("break %s", labelName))
+			g.indent--
+			g.writeLine("}")
+		} else {
+			g.generateStatement(s)
+		}
+	default:
+		// 其他语句直接生成
+		g.generateStatement(s)
+	}
+}
+
+// isErrableCall 检查表达式是否是 errable 函数调用
+func (g *CodeGen) isErrableCall(expr parser.Expression) bool {
+	if call, ok := expr.(*parser.CallExpr); ok {
+		// 检查被调用的函数是否是 errable
+		if ident, ok := call.Function.(*parser.Identifier); ok {
+			sym := g.transpiler.table.Get(g.transpiler.pkg, ident.Value)
+			if sym != nil && sym.Errable {
+				return true
+			}
+		} else if sel, ok := call.Function.(*parser.SelectorExpr); ok {
+			// 方法调用
+			methodName := sel.Sel
+			for _, sym := range g.transpiler.table.GetAll() {
+				if (sym.Kind == symbol.SymbolClassMethod || sym.Kind == symbol.SymbolMethod) && 
+				   sym.Name == methodName && sym.Errable {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// containsErrableCall 递归检查表达式是否包含 errable 调用
+func (g *CodeGen) containsErrableCall(expr parser.Expression) bool {
+	if expr == nil {
+		return false
+	}
+	
+	// 先检查当前表达式
+	if g.isErrableCall(expr) {
+		return true
+	}
+	
+	// 递归检查子表达式
+	switch e := expr.(type) {
+	case *parser.CallExpr:
+		// 检查参数
+		for _, arg := range e.Arguments {
+			if g.containsErrableCall(arg) {
+				return true
+			}
+		}
+	case *parser.BinaryExpr:
+		return g.containsErrableCall(e.Left) || g.containsErrableCall(e.Right)
+	case *parser.UnaryExpr:
+		return g.containsErrableCall(e.Operand)
+	case *parser.IndexExpr:
+		return g.containsErrableCall(e.X) || g.containsErrableCall(e.Index)
+	case *parser.SelectorExpr:
+		return g.containsErrableCall(e.X)
+	}
+	
+	return false
 }
 
 // generateIfStmt 生成 if 语句
@@ -2012,6 +2387,14 @@ func (g *CodeGen) generateCallExpr(expr *parser.CallExpr) string {
 			return g.generatePrintCall("Println", expr.Arguments)
 		case "print_f":
 			return g.generatePrintCall("Printf", expr.Arguments)
+		case "errorf":
+			// errorf 翻译为 fmt.Errorf
+			g.transpiler.needFmt = true
+			var argStrs []string
+			for _, arg := range expr.Arguments {
+				argStrs = append(argStrs, g.generateExpression(arg))
+			}
+			return "fmt.Errorf(" + strings.Join(argStrs, ", ") + ")"
 		}
 
 		// 检查是否是带默认参数的函数

@@ -118,6 +118,15 @@ func (t *Transpiler) TranspileFileWithName(file *parser.File, fileName string) (
 		}
 	}
 
+	// 校验 errable 函数调用
+	t.validateErrableCalls(file)
+	
+	// 校验未定义的符号
+	t.validateUndefinedSymbols(file)
+	
+	// 校验未使用的导入
+	t.validateUnusedImports(file)
+
 	// 如果有错误，返回错误
 	if len(t.errors) > 0 {
 		return "", &ImplementsError{Errors: t.errors}
@@ -670,4 +679,530 @@ func (t *Transpiler) validateMainMethod(classDecl *parser.ClassDecl) {
 // IsEntryClass 检查是否是入口类（类名与文件名一致，且 package 是 main）
 func (t *Transpiler) IsEntryClass(classDecl *parser.ClassDecl) bool {
 	return t.pkg == "main" && t.currentFile != "" && classDecl.Name == t.currentFile
+}
+
+// validateErrableCalls 验证 errable 函数调用是否被正确处理
+func (t *Transpiler) validateErrableCalls(file *parser.File) {
+	for _, stmt := range file.Statements {
+		switch s := stmt.(type) {
+		case *parser.FuncDecl:
+			if s.Body != nil {
+				t.validateErrableCallsInFunc(s.Name, s.Errable, s.Body)
+			}
+		case *parser.ClassDecl:
+			for _, method := range s.Methods {
+				if method.Body != nil {
+					t.validateErrableCallsInFunc(s.Name+"."+method.Name, method.Errable, method.Body)
+				}
+			}
+			if s.InitMethod != nil && s.InitMethod.Body != nil {
+				t.validateErrableCallsInFunc(s.Name+".init", s.InitMethod.Errable, s.InitMethod.Body)
+			}
+		case *parser.StructDecl:
+			for _, method := range s.Methods {
+				if method.Body != nil {
+					t.validateErrableCallsInFunc(s.Name+"."+method.Name, method.Errable, method.Body)
+				}
+			}
+			if s.InitMethod != nil && s.InitMethod.Body != nil {
+				t.validateErrableCallsInFunc(s.Name+".init", s.InitMethod.Errable, s.InitMethod.Body)
+			}
+		}
+	}
+}
+
+// validateErrableCallsInFunc 在函数/方法体中验证 errable 调用
+func (t *Transpiler) validateErrableCallsInFunc(funcName string, funcIsErrable bool, body *parser.BlockStmt) {
+	t.validateErrableCallsInBlock(funcName, funcIsErrable, false, body)
+}
+
+// validateErrableCallsInBlock 在代码块中验证 errable 调用
+func (t *Transpiler) validateErrableCallsInBlock(funcName string, funcIsErrable bool, inTryBlock bool, block *parser.BlockStmt) {
+	for _, stmt := range block.Statements {
+		t.validateErrableCallsInStmt(funcName, funcIsErrable, inTryBlock, stmt)
+	}
+}
+
+// validateErrableCallsInStmt 在语句中验证 errable 调用
+func (t *Transpiler) validateErrableCallsInStmt(funcName string, funcIsErrable bool, inTryBlock bool, stmt parser.Statement) {
+	switch s := stmt.(type) {
+	case *parser.ExpressionStmt:
+		t.validateErrableCallsInExpr(funcName, funcIsErrable, inTryBlock, s.Expression)
+	case *parser.TryStmt:
+		// try 块内的调用被允许
+		if s.Body != nil {
+			t.validateErrableCallsInBlock(funcName, funcIsErrable, true, s.Body)
+		}
+		// catch 块内的调用也需要检查（catch 块不是 try 块）
+		if s.Catch != nil && s.Catch.Body != nil {
+			t.validateErrableCallsInBlock(funcName, funcIsErrable, inTryBlock, s.Catch.Body)
+		}
+	case *parser.ReturnStmt:
+		for _, v := range s.Values {
+			t.validateErrableCallsInExpr(funcName, funcIsErrable, inTryBlock, v)
+		}
+	case *parser.AssignStmt:
+		for _, r := range s.Right {
+			t.validateErrableCallsInExpr(funcName, funcIsErrable, inTryBlock, r)
+		}
+	case *parser.ShortVarDecl:
+		t.validateErrableCallsInExpr(funcName, funcIsErrable, inTryBlock, s.Value)
+	case *parser.VarDecl:
+		if s.Value != nil {
+			t.validateErrableCallsInExpr(funcName, funcIsErrable, inTryBlock, s.Value)
+		}
+	case *parser.IfStmt:
+		if s.Condition != nil {
+			t.validateErrableCallsInExpr(funcName, funcIsErrable, inTryBlock, s.Condition)
+		}
+		if s.Consequence != nil {
+			t.validateErrableCallsInBlock(funcName, funcIsErrable, inTryBlock, s.Consequence)
+		}
+		if alt, ok := s.Alternative.(*parser.BlockStmt); ok {
+			t.validateErrableCallsInBlock(funcName, funcIsErrable, inTryBlock, alt)
+		} else if altIf, ok := s.Alternative.(*parser.IfStmt); ok {
+			t.validateErrableCallsInStmt(funcName, funcIsErrable, inTryBlock, altIf)
+		}
+	case *parser.ForStmt:
+		if s.Body != nil {
+			t.validateErrableCallsInBlock(funcName, funcIsErrable, inTryBlock, s.Body)
+		}
+	case *parser.RangeStmt:
+		if s.Body != nil {
+			t.validateErrableCallsInBlock(funcName, funcIsErrable, inTryBlock, s.Body)
+		}
+	case *parser.SwitchStmt:
+		for _, c := range s.Cases {
+			for _, stmt := range c.Body {
+				t.validateErrableCallsInStmt(funcName, funcIsErrable, inTryBlock, stmt)
+			}
+		}
+	case *parser.BlockStmt:
+		t.validateErrableCallsInBlock(funcName, funcIsErrable, inTryBlock, s)
+	}
+}
+
+// validateErrableCallsInExpr 在表达式中验证 errable 调用
+func (t *Transpiler) validateErrableCallsInExpr(funcName string, funcIsErrable bool, inTryBlock bool, expr parser.Expression) {
+	if expr == nil {
+		return
+	}
+
+	switch e := expr.(type) {
+	case *parser.CallExpr:
+		// 检查被调用的函数是否是 errable
+		if ident, ok := e.Function.(*parser.Identifier); ok {
+			// 查找符号表
+			sym := t.table.Get(t.pkg, ident.Value)
+			if sym != nil && sym.Errable {
+				// 这是一个 errable 调用，检查是否被正确处理
+				if !inTryBlock && !funcIsErrable {
+					t.errors = append(t.errors, fmt.Sprintf(
+						"function %s: call to errable function '%s' must be inside a try block or current function must be errable",
+						funcName, ident.Value))
+				}
+			}
+		} else if sel, ok := e.Function.(*parser.SelectorExpr); ok {
+			// 方法调用 obj.method()
+			methodName := sel.Sel
+			// 尝试查找方法符号（需要知道接收者类型，这里简化处理）
+			// 遍历所有符号查找匹配的方法
+			for _, sym := range t.table.GetAll() {
+				if sym.Kind == symbol.SymbolClassMethod || sym.Kind == symbol.SymbolMethod {
+					if sym.Name == methodName && sym.Errable {
+						if !inTryBlock && !funcIsErrable {
+							t.errors = append(t.errors, fmt.Sprintf(
+								"function %s: call to errable method '%s' must be inside a try block or current function must be errable",
+								funcName, methodName))
+						}
+						break
+					}
+				}
+			}
+		}
+
+		// 递归检查参数
+		for _, arg := range e.Arguments {
+			t.validateErrableCallsInExpr(funcName, funcIsErrable, inTryBlock, arg)
+		}
+	case *parser.BinaryExpr:
+		t.validateErrableCallsInExpr(funcName, funcIsErrable, inTryBlock, e.Left)
+		t.validateErrableCallsInExpr(funcName, funcIsErrable, inTryBlock, e.Right)
+	case *parser.UnaryExpr:
+		t.validateErrableCallsInExpr(funcName, funcIsErrable, inTryBlock, e.Operand)
+	case *parser.IndexExpr:
+		t.validateErrableCallsInExpr(funcName, funcIsErrable, inTryBlock, e.X)
+		t.validateErrableCallsInExpr(funcName, funcIsErrable, inTryBlock, e.Index)
+	case *parser.SelectorExpr:
+		t.validateErrableCallsInExpr(funcName, funcIsErrable, inTryBlock, e.X)
+	}
+}
+
+// validateUndefinedSymbols 校验文件中使用的所有符号是否已定义或导入
+func (t *Transpiler) validateUndefinedSymbols(file *parser.File) {
+	// 收集所有导入的类型
+	importedTypes := make(map[string]bool)
+	
+	// 从导入语句收集
+	for _, imp := range file.Imports {
+		for _, spec := range imp.Specs {
+			if spec.Alias != "" {
+				// 使用别名
+				importedTypes[spec.Alias] = true
+			}
+			// 导入的类型名
+			if spec.TypeName != "" {
+				importedTypes[spec.TypeName] = true
+			}
+		}
+	}
+	
+	// 收集当前文件定义的类型
+	definedTypes := make(map[string]bool)
+	for _, stmt := range file.Statements {
+		switch decl := stmt.(type) {
+		case *parser.ClassDecl:
+			definedTypes[decl.Name] = true
+		case *parser.InterfaceDecl:
+			definedTypes[decl.Name] = true
+		case *parser.StructDecl:
+			definedTypes[decl.Name] = true
+		}
+	}
+	
+	// 遍历所有语句，检查使用的类型
+	for _, stmt := range file.Statements {
+		t.validateSymbolsInStmt(stmt, importedTypes, definedTypes)
+	}
+}
+
+// validateSymbolsInStmt 检查语句中使用的符号
+func (t *Transpiler) validateSymbolsInStmt(stmt parser.Statement, importedTypes, definedTypes map[string]bool) {
+	if stmt == nil {
+		return
+	}
+	
+	switch s := stmt.(type) {
+	case *parser.ClassDecl:
+		// 检查类中的方法
+		for _, method := range s.Methods {
+			if method.Body != nil {
+				t.validateSymbolsInBlock(method.Body, importedTypes, definedTypes)
+			}
+		}
+	case *parser.FuncDecl:
+		if s.Body != nil {
+			t.validateSymbolsInBlock(s.Body, importedTypes, definedTypes)
+		}
+	case *parser.StructDecl:
+		for _, method := range s.Methods {
+			if method.Body != nil {
+				t.validateSymbolsInBlock(method.Body, importedTypes, definedTypes)
+			}
+		}
+	}
+}
+
+// validateSymbolsInBlock 检查块中使用的符号
+func (t *Transpiler) validateSymbolsInBlock(block *parser.BlockStmt, importedTypes, definedTypes map[string]bool) {
+	if block == nil {
+		return
+	}
+	
+	for _, stmt := range block.Statements {
+		t.validateSymbolsInBlockStmt(stmt, importedTypes, definedTypes)
+	}
+}
+
+// validateSymbolsInBlockStmt 检查块语句中使用的符号
+func (t *Transpiler) validateSymbolsInBlockStmt(stmt parser.Statement, importedTypes, definedTypes map[string]bool) {
+	if stmt == nil {
+		return
+	}
+	
+	switch s := stmt.(type) {
+	case *parser.ExpressionStmt:
+		t.validateSymbolsInExpr(s.Expression, importedTypes, definedTypes)
+	case *parser.ShortVarDecl:
+		t.validateSymbolsInExpr(s.Value, importedTypes, definedTypes)
+	case *parser.AssignStmt:
+		for _, expr := range s.Left {
+			t.validateSymbolsInExpr(expr, importedTypes, definedTypes)
+		}
+		for _, expr := range s.Right {
+			t.validateSymbolsInExpr(expr, importedTypes, definedTypes)
+		}
+	case *parser.IfStmt:
+		if s.Init != nil {
+			t.validateSymbolsInBlockStmt(s.Init, importedTypes, definedTypes)
+		}
+		t.validateSymbolsInExpr(s.Condition, importedTypes, definedTypes)
+		t.validateSymbolsInBlock(s.Consequence, importedTypes, definedTypes)
+		if altBlock, ok := s.Alternative.(*parser.BlockStmt); ok {
+			t.validateSymbolsInBlock(altBlock, importedTypes, definedTypes)
+		} else if altIf, ok := s.Alternative.(*parser.IfStmt); ok {
+			t.validateSymbolsInBlockStmt(altIf, importedTypes, definedTypes)
+		}
+	case *parser.ForStmt:
+		if s.Init != nil {
+			t.validateSymbolsInBlockStmt(s.Init, importedTypes, definedTypes)
+		}
+		t.validateSymbolsInExpr(s.Condition, importedTypes, definedTypes)
+		if s.Post != nil {
+			t.validateSymbolsInBlockStmt(s.Post, importedTypes, definedTypes)
+		}
+		t.validateSymbolsInBlock(s.Body, importedTypes, definedTypes)
+	case *parser.ReturnStmt:
+		for _, expr := range s.Values {
+			t.validateSymbolsInExpr(expr, importedTypes, definedTypes)
+		}
+	case *parser.TryStmt:
+		t.validateSymbolsInBlock(s.Body, importedTypes, definedTypes)
+		if s.Catch != nil && s.Catch.Body != nil {
+			t.validateSymbolsInBlock(s.Catch.Body, importedTypes, definedTypes)
+		}
+	case *parser.ThrowStmt:
+		t.validateSymbolsInExpr(s.Value, importedTypes, definedTypes)
+	}
+}
+
+// validateSymbolsInExpr 检查表达式中使用的符号
+func (t *Transpiler) validateSymbolsInExpr(expr parser.Expression, importedTypes, definedTypes map[string]bool) {
+	if expr == nil {
+		return
+	}
+	
+	switch e := expr.(type) {
+	case *parser.CallExpr:
+		// 检查构造函数调用 new Type()
+		if newExpr, ok := e.Function.(*parser.NewExpr); ok {
+			// new Type() 的情况
+			if ident, ok := newExpr.Type.(*parser.Identifier); ok {
+				typeName := ident.Value
+				// 检查类型是否已定义或导入
+				if !importedTypes[typeName] && !definedTypes[typeName] && !t.isBuiltinType(typeName) {
+					t.errors = append(t.errors, fmt.Sprintf(
+						"undefined type '%s': not imported or defined", typeName))
+				}
+			}
+		} else {
+			t.validateSymbolsInExpr(e.Function, importedTypes, definedTypes)
+		}
+		// 检查参数
+		for _, arg := range e.Arguments {
+			t.validateSymbolsInExpr(arg, importedTypes, definedTypes)
+		}
+	case *parser.NewExpr:
+		// new 表达式
+		if ident, ok := e.Type.(*parser.Identifier); ok {
+			typeName := ident.Value
+			if !importedTypes[typeName] && !definedTypes[typeName] && !t.isBuiltinType(typeName) {
+				t.errors = append(t.errors, fmt.Sprintf(
+					"undefined type '%s': not imported or defined", typeName))
+			}
+		}
+	case *parser.BinaryExpr:
+		t.validateSymbolsInExpr(e.Left, importedTypes, definedTypes)
+		t.validateSymbolsInExpr(e.Right, importedTypes, definedTypes)
+	case *parser.UnaryExpr:
+		t.validateSymbolsInExpr(e.Operand, importedTypes, definedTypes)
+	case *parser.IndexExpr:
+		t.validateSymbolsInExpr(e.X, importedTypes, definedTypes)
+		t.validateSymbolsInExpr(e.Index, importedTypes, definedTypes)
+	case *parser.SelectorExpr:
+		t.validateSymbolsInExpr(e.X, importedTypes, definedTypes)
+	}
+}
+
+// isBuiltinType 检查是否是内置类型
+func (t *Transpiler) isBuiltinType(typeName string) bool {
+	builtins := map[string]bool{
+		"int": true, "int8": true, "int16": true, "int32": true, "int64": true,
+		"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
+		"float32": true, "float64": true,
+		"bool": true, "string": true, "byte": true, "rune": true,
+		"error": true,
+	}
+	return builtins[typeName]
+}
+
+// validateUnusedImports 检查未使用的导入
+func (t *Transpiler) validateUnusedImports(file *parser.File) {
+	if len(file.Imports) == 0 {
+		return
+	}
+	
+	// 收集所有导入的类型
+	importedTypes := make(map[string]*parser.ImportSpec)
+	for _, imp := range file.Imports {
+		for _, spec := range imp.Specs {
+			// 跳过 Go 标准库导入（如 fmt，可能被 println 等内置函数使用）
+			if spec.FromGo {
+				continue
+			}
+			
+			// 记录导入的类型
+			key := spec.TypeName
+			if spec.Alias != "" {
+				key = spec.Alias
+			}
+			importedTypes[key] = spec
+		}
+	}
+	
+	if len(importedTypes) == 0 {
+		return
+	}
+	
+	// 检查代码中是否使用了这些类型
+	usedTypes := make(map[string]bool)
+	t.collectUsedTypes(file, usedTypes)
+	
+	// 检查未使用的导入
+	for typeName, spec := range importedTypes {
+		if !usedTypes[typeName] {
+			t.errors = append(t.errors, fmt.Sprintf(
+				"imported type '%s' is not used (from %s)", typeName, spec.Path))
+		}
+	}
+}
+
+// collectUsedTypes 收集代码中使用的类型
+func (t *Transpiler) collectUsedTypes(file *parser.File, usedTypes map[string]bool) {
+	for _, stmt := range file.Statements {
+		t.collectUsedTypesInStmt(stmt, usedTypes)
+	}
+}
+
+// collectUsedTypesInStmt 在语句中收集使用的类型
+func (t *Transpiler) collectUsedTypesInStmt(stmt parser.Statement, usedTypes map[string]bool) {
+	if stmt == nil {
+		return
+	}
+	
+	switch s := stmt.(type) {
+	case *parser.ClassDecl:
+		// 检查类中的方法
+		for _, method := range s.Methods {
+			if method.Body != nil {
+				t.collectUsedTypesInBlock(method.Body, usedTypes)
+			}
+		}
+	case *parser.FuncDecl:
+		if s.Body != nil {
+			t.collectUsedTypesInBlock(s.Body, usedTypes)
+		}
+	case *parser.StructDecl:
+		for _, method := range s.Methods {
+			if method.Body != nil {
+				t.collectUsedTypesInBlock(method.Body, usedTypes)
+			}
+		}
+	}
+}
+
+// collectUsedTypesInBlock 在块中收集使用的类型
+func (t *Transpiler) collectUsedTypesInBlock(block *parser.BlockStmt, usedTypes map[string]bool) {
+	if block == nil {
+		return
+	}
+	
+	for _, stmt := range block.Statements {
+		t.collectUsedTypesInBlockStmt(stmt, usedTypes)
+	}
+}
+
+// collectUsedTypesInBlockStmt 在块语句中收集使用的类型
+func (t *Transpiler) collectUsedTypesInBlockStmt(stmt parser.Statement, usedTypes map[string]bool) {
+	if stmt == nil {
+		return
+	}
+	
+	switch s := stmt.(type) {
+	case *parser.ExpressionStmt:
+		t.collectUsedTypesInExpr(s.Expression, usedTypes)
+	case *parser.ShortVarDecl:
+		t.collectUsedTypesInExpr(s.Value, usedTypes)
+	case *parser.AssignStmt:
+		for _, expr := range s.Left {
+			t.collectUsedTypesInExpr(expr, usedTypes)
+		}
+		for _, expr := range s.Right {
+			t.collectUsedTypesInExpr(expr, usedTypes)
+		}
+	case *parser.IfStmt:
+		if s.Init != nil {
+			t.collectUsedTypesInBlockStmt(s.Init, usedTypes)
+		}
+		t.collectUsedTypesInExpr(s.Condition, usedTypes)
+		t.collectUsedTypesInBlock(s.Consequence, usedTypes)
+		if altBlock, ok := s.Alternative.(*parser.BlockStmt); ok {
+			t.collectUsedTypesInBlock(altBlock, usedTypes)
+		} else if altIf, ok := s.Alternative.(*parser.IfStmt); ok {
+			t.collectUsedTypesInBlockStmt(altIf, usedTypes)
+		}
+	case *parser.ForStmt:
+		if s.Init != nil {
+			t.collectUsedTypesInBlockStmt(s.Init, usedTypes)
+		}
+		t.collectUsedTypesInExpr(s.Condition, usedTypes)
+		if s.Post != nil {
+			t.collectUsedTypesInBlockStmt(s.Post, usedTypes)
+		}
+		t.collectUsedTypesInBlock(s.Body, usedTypes)
+	case *parser.ReturnStmt:
+		for _, expr := range s.Values {
+			t.collectUsedTypesInExpr(expr, usedTypes)
+		}
+	case *parser.TryStmt:
+		t.collectUsedTypesInBlock(s.Body, usedTypes)
+		if s.Catch != nil && s.Catch.Body != nil {
+			t.collectUsedTypesInBlock(s.Catch.Body, usedTypes)
+		}
+	case *parser.ThrowStmt:
+		t.collectUsedTypesInExpr(s.Value, usedTypes)
+	}
+}
+
+// collectUsedTypesInExpr 在表达式中收集使用的类型
+func (t *Transpiler) collectUsedTypesInExpr(expr parser.Expression, usedTypes map[string]bool) {
+	if expr == nil {
+		return
+	}
+	
+	switch e := expr.(type) {
+	case *parser.CallExpr:
+		// 检查构造函数调用 new Type()
+		if newExpr, ok := e.Function.(*parser.NewExpr); ok {
+			if ident, ok := newExpr.Type.(*parser.Identifier); ok {
+				usedTypes[ident.Value] = true
+			}
+		} else {
+			t.collectUsedTypesInExpr(e.Function, usedTypes)
+		}
+		// 检查参数
+		for _, arg := range e.Arguments {
+			t.collectUsedTypesInExpr(arg, usedTypes)
+		}
+	case *parser.NewExpr:
+		// new 表达式
+		if ident, ok := e.Type.(*parser.Identifier); ok {
+			usedTypes[ident.Value] = true
+		}
+	case *parser.StaticAccessExpr:
+		// 静态方法调用 Type::method
+		if ident, ok := e.Left.(*parser.Identifier); ok {
+			usedTypes[ident.Value] = true
+		}
+	case *parser.BinaryExpr:
+		t.collectUsedTypesInExpr(e.Left, usedTypes)
+		t.collectUsedTypesInExpr(e.Right, usedTypes)
+	case *parser.UnaryExpr:
+		t.collectUsedTypesInExpr(e.Operand, usedTypes)
+	case *parser.IndexExpr:
+		t.collectUsedTypesInExpr(e.X, usedTypes)
+		t.collectUsedTypesInExpr(e.Index, usedTypes)
+	case *parser.SelectorExpr:
+		t.collectUsedTypesInExpr(e.X, usedTypes)
+	}
 }

@@ -268,6 +268,10 @@ func (p *Parser) parseStatement() Statement {
 		return p.parseContinueStmt()
 	case lexer.TOKEN_FALLTHROUGH:
 		return p.parseFallthroughStmt()
+	case lexer.TOKEN_TRY:
+		return p.parseTryStmt()
+	case lexer.TOKEN_THROW:
+		return p.parseThrowStmt()
 	case lexer.TOKEN_LBRACE:
 		return p.parseBlockStmt()
 	default:
@@ -374,6 +378,12 @@ func (p *Parser) parseFuncDecl(public bool, visibility string) *FuncDecl {
 		if typ != nil {
 			decl.Results = []*Field{{Type: typ}}
 		}
+	}
+
+	// 检查是否有 ! 标记（errable）
+	if p.peekTokenIs(lexer.TOKEN_NOT) {
+		decl.Errable = true
+		p.nextToken()
 	}
 
 	// 解析函数体
@@ -661,6 +671,12 @@ func (p *Parser) parseStructMethod(visibility string) *ClassMethod {
 		}
 	}
 
+	// 检查是否有 ! 标记（errable）
+	if p.peekTokenIs(lexer.TOKEN_NOT) {
+		method.Errable = true
+		p.nextToken()
+	}
+
 	// 解析方法体
 	if p.peekTokenIs(lexer.TOKEN_LBRACE) {
 		p.nextToken()
@@ -921,13 +937,19 @@ func (p *Parser) parseClassMethodWithAbstract(visibility string, isStatic bool, 
 	if p.peekTokenIs(lexer.TOKEN_LPAREN) {
 		p.nextToken()
 		method.Results = p.parseFieldList(lexer.TOKEN_RPAREN)
-	} else if !p.peekTokenIs(lexer.TOKEN_LBRACE) && !p.peekTokenIs(lexer.TOKEN_RBRACE) && !p.peekTokenIs(lexer.TOKEN_EOF) {
+	} else if !p.peekTokenIs(lexer.TOKEN_LBRACE) && !p.peekTokenIs(lexer.TOKEN_RBRACE) && !p.peekTokenIs(lexer.TOKEN_EOF) && !p.peekTokenIs(lexer.TOKEN_NOT) {
 		// 单个返回值类型
 		p.nextToken()
 		typ := p.parseType()
 		if typ != nil {
 			method.Results = []*Field{{Type: typ}}
 		}
+	}
+
+	// 检查是否有 ! 标记（errable）
+	if p.peekTokenIs(lexer.TOKEN_NOT) {
+		method.Errable = true
+		p.nextToken()
 	}
 
 	// 方法体（抽象方法没有方法体）
@@ -1027,6 +1049,12 @@ func (p *Parser) parseFuncSignature() *FuncSignature {
 		if typ != nil {
 			sig.Results = []*Field{{Type: typ}}
 		}
+	}
+
+	// 检查是否有 ! 标记（errable）
+	if p.peekTokenIs(lexer.TOKEN_NOT) {
+		sig.Errable = true
+		p.nextToken()
 	}
 
 	return sig
@@ -1434,6 +1462,61 @@ func (p *Parser) parseContinueStmt() *ContinueStmt {
 // parseFallthroughStmt 解析 fallthrough 语句
 func (p *Parser) parseFallthroughStmt() *FallthroughStmt {
 	return &FallthroughStmt{Token: p.curToken}
+}
+
+// parseTryStmt 解析 try-catch 语句
+func (p *Parser) parseTryStmt() *TryStmt {
+	stmt := &TryStmt{Token: p.curToken}
+
+	// 解析 try 块
+	if !p.expectPeek(lexer.TOKEN_LBRACE) {
+		return nil
+	}
+	stmt.Body = p.parseBlockStmt()
+
+	// 解析 catch 子句
+	if p.peekTokenIs(lexer.TOKEN_CATCH) {
+		p.nextToken()
+		stmt.Catch = p.parseCatchClause()
+	}
+
+	// TODO: 未来可以添加 finally 子句支持
+
+	return stmt
+}
+
+// parseCatchClause 解析 catch 子句
+func (p *Parser) parseCatchClause() *CatchClause {
+	clause := &CatchClause{Token: p.curToken}
+
+	// 解析异常参数名
+	if p.peekTokenIs(lexer.TOKEN_IDENT) {
+		p.nextToken()
+		clause.Param = p.curToken.Literal
+	}
+
+	// 解析 catch 块
+	if !p.expectPeek(lexer.TOKEN_LBRACE) {
+		return nil
+	}
+	clause.Body = p.parseBlockStmt()
+
+	return clause
+}
+
+// parseThrowStmt 解析 throw 语句
+func (p *Parser) parseThrowStmt() *ThrowStmt {
+	stmt := &ThrowStmt{Token: p.curToken}
+
+	if p.peekTokenIs(lexer.TOKEN_RBRACE) || p.peekTokenIs(lexer.TOKEN_SEMICOLON) || p.peekTokenIs(lexer.TOKEN_EOF) {
+		p.addError("throw statement requires an expression")
+		return nil
+	}
+
+	p.nextToken()
+	stmt.Value = p.parseExpression(LOWEST)
+
+	return stmt
 }
 
 // parseBlockStmt 解析代码块

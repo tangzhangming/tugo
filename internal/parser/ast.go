@@ -59,6 +59,7 @@ type FuncDecl struct {
 	Params   []*Field    // 参数列表
 	Results  []*Field    // 返回值列表
 	Body     *BlockStmt  // 函数体
+	Errable  bool        // 是否可能抛出错误（返回类型带 ! 标记）
 }
 
 func (f *FuncDecl) TokenLiteral() string { return f.Token.Literal }
@@ -132,6 +133,7 @@ type ClassMethod struct {
 	Visibility string      // public/private/protected
 	Static     bool        // 是否静态
 	Abstract   bool        // 是否抽象方法
+	Errable    bool        // 是否可能抛出错误（返回类型带 ! 标记）
 }
 
 // ThisExpr this 表达式
@@ -176,6 +178,7 @@ type FuncSignature struct {
 	Name    string
 	Params  []*Field
 	Results []*Field
+	Errable bool // 是否可能抛出错误（返回类型带 ! 标记）
 }
 
 // TypeDecl 类型声明
@@ -368,6 +371,35 @@ type FallthroughStmt struct {
 
 func (f *FallthroughStmt) TokenLiteral() string { return f.Token.Literal }
 func (f *FallthroughStmt) statementNode()       {}
+
+// TryStmt try-catch 语句
+type TryStmt struct {
+	Token   lexer.Token
+	Body    *BlockStmt   // try 块
+	Catch   *CatchClause // catch 子句
+	Finally *BlockStmt   // finally 子句（可选，后续扩展）
+}
+
+func (t *TryStmt) TokenLiteral() string { return t.Token.Literal }
+func (t *TryStmt) statementNode()       {}
+
+// CatchClause catch 子句
+type CatchClause struct {
+	Token lexer.Token
+	Param string     // 异常参数名 (e)
+	Body  *BlockStmt // catch 块
+}
+
+func (c *CatchClause) TokenLiteral() string { return c.Token.Literal }
+
+// ThrowStmt throw 语句
+type ThrowStmt struct {
+	Token lexer.Token
+	Value Expression // 错误值
+}
+
+func (t *ThrowStmt) TokenLiteral() string { return t.Token.Literal }
+func (t *ThrowStmt) statementNode()       {}
 
 // ExpressionStmt 表达式语句
 type ExpressionStmt struct {
