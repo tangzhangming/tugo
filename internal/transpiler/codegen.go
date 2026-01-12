@@ -352,7 +352,12 @@ func (g *CodeGen) generateStatement(stmt parser.Statement) {
 	case *parser.BlockStmt:
 		g.generateBlockStmt(s)
 	case *parser.ExpressionStmt:
-		g.writeLine(g.generateExpression(s.Expression))
+		// 如果在 errable 函数中且表达式是 errable 调用，自动添加错误检查
+		if g.currentFuncErrable && g.isErrableCall(s.Expression) {
+			g.generateErrableCallStmt(s.Expression)
+		} else {
+			g.writeLine(g.generateExpression(s.Expression))
+		}
 	case *parser.SendStmt:
 		g.generateSendStmt(s)
 	case *parser.IncDecStmt:
@@ -1947,15 +1952,7 @@ func (g *CodeGen) generateTryBlockStatement(stmt parser.Statement, labelName str
 			g.indent--
 			g.writeLine("}")
 		} else if g.containsErrableCall(s.Expression) {
-			// 检查嵌套的 errable 调用是否返回多个值
-			if g.hasMultiValueErrableCall(s.Expression) {
-				g.transpiler.errors = append(g.transpiler.errors, 
-					"multi-value errable function cannot be used in nested expression, must assign to variables first")
-				g.generateStatement(s)
-				return
-			}
-			
-			// 包含嵌套的 errable 调用，需要提取
+			// 包含嵌套的 errable 调用，需要提取（包括多返回值的情况）
 			newExpr := g.extractErrableCalls(s.Expression, labelName, errVarName, tmpCounter)
 			// 生成替换后的表达式语句
 			g.writeIndent()
@@ -2075,9 +2072,14 @@ func (g *CodeGen) extractErrableCalls(expr parser.Expression, labelName, errVarN
 			g.indent--
 			g.writeLine("}")
 			
-			// 返回临时变量标识符（如果有多个，只返回第一个用于嵌套表达式）
+			// 对于多返回值，创建一个特殊的"多值标识符"（用逗号连接）
+			// 这会在参数展开时被特殊处理
 			if len(tmpVars) > 0 {
-				return &parser.Identifier{Value: tmpVars[0]}
+				if len(tmpVars) == 1 {
+					return &parser.Identifier{Value: tmpVars[0]}
+				}
+				// 多个返回值：用特殊标记表示需要展开
+				return &parser.Identifier{Value: "$$MULTI$$" + strings.Join(tmpVars, ",")}
 			}
 			return &parser.Identifier{Value: "_"}
 		}
@@ -2121,11 +2123,84 @@ func (g *CodeGen) generateExpressionFromExtracted(expr parser.Expression) string
 	
 	// 对于临时变量标识符，直接返回变量名
 	if ident, ok := expr.(*parser.Identifier); ok {
+		// 检查是否是多值标识符
+		if strings.HasPrefix(ident.Value, "$$MULTI$$") {
+			// 去除标记前缀，返回逗号分隔的变量
+			return strings.TrimPrefix(ident.Value, "$$MULTI$$")
+		}
 		return ident.Value
+	}
+	
+	// 对于 CallExpr，需要特殊处理参数中的多值展开
+	if call, ok := expr.(*parser.CallExpr); ok {
+		return g.generateCallExprWithMultiValueExpansion(call)
 	}
 	
 	// 其他情况使用标准生成
 	return g.generateExpression(expr)
+}
+
+// generateCallExprWithMultiValueExpansion 生成 CallExpr，展开多值参数
+func (g *CodeGen) generateCallExprWithMultiValueExpansion(call *parser.CallExpr) string {
+	var result strings.Builder
+	
+	// 生成函数名
+	result.WriteString(g.generateExpression(call.Function))
+	result.WriteString("(")
+	
+	// 处理参数，展开多值标识符
+	var expandedArgs []string
+	for _, arg := range call.Arguments {
+		if ident, ok := arg.(*parser.Identifier); ok && strings.HasPrefix(ident.Value, "$$MULTI$$") {
+			// 展开多值参数
+			values := strings.TrimPrefix(ident.Value, "$$MULTI$$")
+			expandedArgs = append(expandedArgs, strings.Split(values, ",")...)
+		} else {
+			// 普通参数
+			expandedArgs = append(expandedArgs, g.generateExpressionFromExtracted(arg))
+		}
+	}
+	
+	result.WriteString(strings.Join(expandedArgs, ", "))
+	result.WriteString(")")
+	
+	return result.String()
+}
+
+// generateErrableCallStmt 生成 errable 调用语句（自动错误检查和传播）
+func (g *CodeGen) generateErrableCallStmt(expr parser.Expression) {
+	call, ok := expr.(*parser.CallExpr)
+	if !ok {
+		g.writeLine(g.generateExpression(expr))
+		return
+	}
+	
+	resultCount := g.getErrableFuncResultCount(call)
+	
+	// 生成接收变量（全部用 _ 忽略，只关心 error）
+	g.writeIndent()
+	for i := 0; i < resultCount; i++ {
+		g.write("_, ")
+	}
+	g.write("err := ")
+	g.write(g.generateExpression(call))
+	g.write("\n")
+	
+	// 生成错误检查
+	g.writeLine("if err != nil {")
+	g.indent++
+	
+	// 返回零值 + error
+	g.writeIndent()
+	g.write("return ")
+	zeroVals := g.generateZeroValues()
+	if zeroVals != "" {
+		g.write(zeroVals)
+	}
+	g.write("err\n")
+	
+	g.indent--
+	g.writeLine("}")
 }
 
 // hasMultiValueErrableCall 检查表达式中是否包含返回多值的 errable 调用
