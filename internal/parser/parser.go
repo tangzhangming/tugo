@@ -2009,7 +2009,8 @@ func (p *Parser) parseStaticAccessExpression(left Expression) Expression {
 	token := p.curToken
 	p.nextToken()
 
-	if !p.curTokenIs(lexer.TOKEN_IDENT) {
+	// 允许标识符或 class 关键字（用于 ClassName::class 获取类信息）
+	if !p.curTokenIs(lexer.TOKEN_IDENT) && !p.curTokenIs(lexer.TOKEN_CLASS) {
 		p.addError("expected member name after ::")
 		return nil
 	}

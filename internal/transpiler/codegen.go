@@ -133,8 +133,12 @@ func (g *CodeGen) prescan(file *parser.File) {
 	for _, stmt := range file.Statements {
 		g.prescanStatement(stmt)
 
-		// 扫描类的方法
+		// 扫描类的方法，并添加 tugo/lang 导入（用于 ClassInfo）
 		if classDecl, ok := stmt.(*parser.ClassDecl); ok {
+			// 非静态类需要 ClassInfo，添加 tugo/lang 导入
+			if !classDecl.Static {
+				g.tugoImports["tugo/lang"] = "lang"
+			}
 			for _, method := range classDecl.Methods {
 				if method.Body != nil {
 					g.prescanBlock(method.Body)
@@ -840,6 +844,9 @@ func (g *CodeGen) generateNormalClass(decl *parser.ClassDecl, className string) 
 			}
 		}
 	}
+
+	// 1.5 生成类信息变量 _ClassName_classInfo
+	g.generateClassInfo(decl, className)
 	g.writeLine("")
 
 	// 2. 生成结构体
@@ -876,6 +883,10 @@ func (g *CodeGen) generateNormalClass(decl *parser.ClassDecl, className string) 
 		g.writeLine("")
 	}
 
+	// 4.5 生成 Class() 方法
+	g.generateClassMethod_Class(className)
+	g.writeLine("")
+
 	// 5. 入口类：生成 Go 的 func main()
 	if isEntryClass && mainMethod != nil {
 		g.generateGoMainFunc(decl, mainMethod)
@@ -884,6 +895,43 @@ func (g *CodeGen) generateNormalClass(decl *parser.ClassDecl, className string) 
 
 	// 清理当前类上下文
 	g.currentClassDecl = nil
+}
+
+// generateClassInfo 生成类信息变量 _ClassName_classInfo
+func (g *CodeGen) generateClassInfo(decl *parser.ClassDecl, className string) {
+	pkgName := g.transpiler.pkg
+	fullName := pkgName + "." + decl.Name
+
+	// 需要导入 tugo/lang 包
+	g.tugoImports["tugo/lang"] = "lang"
+
+	// 生成类信息变量
+	infoVarName := fmt.Sprintf("_%s_classInfo", className)
+
+	// 检查是否有父类
+	if decl.Extends != "" {
+		parentClassName := symbol.ToGoName(decl.Extends, true)
+		parentInfoVar := fmt.Sprintf("_%s_classInfo", parentClassName)
+		// 如果父类在其他包，需要加包前缀
+		if pkg, ok := g.typeToPackage[decl.Extends]; ok {
+			parentInfoVar = pkg + "." + parentInfoVar
+		}
+		g.writeLine(fmt.Sprintf("var %s = &lang.ClassInfo{Name: %q, Package: %q, FullName: %q, Parent: %s}",
+			infoVarName, decl.Name, pkgName, fullName, parentInfoVar))
+	} else {
+		g.writeLine(fmt.Sprintf("var %s = &lang.ClassInfo{Name: %q, Package: %q, FullName: %q}",
+			infoVarName, decl.Name, pkgName, fullName))
+	}
+}
+
+// generateClassMethod_Class 生成 Class() 方法
+func (g *CodeGen) generateClassMethod_Class(className string) {
+	infoVarName := fmt.Sprintf("_%s_classInfo", className)
+	g.writeLine(fmt.Sprintf("func (this *%s) Class() *lang.ClassInfo {", className))
+	g.indent++
+	g.writeLine(fmt.Sprintf("return %s", infoVarName))
+	g.indent--
+	g.writeLine("}")
 }
 
 // generateAbstractClass 生成抽象类（接口 + 基础结构体）
@@ -971,6 +1019,10 @@ func (g *CodeGen) generateChildClass(decl *parser.ClassDecl, className string) {
 		}
 	}
 
+	// 1.5 生成类信息变量 _ClassName_classInfo
+	g.generateClassInfo(decl, className)
+	g.writeLine("")
+
 	// 2. 生成结构体（嵌入父类基础结构体）
 	g.writeLine(fmt.Sprintf("type %s struct {", className))
 	g.indent++
@@ -1008,6 +1060,10 @@ func (g *CodeGen) generateChildClass(decl *parser.ClassDecl, className string) {
 		g.generateClassMethod(decl, className, method)
 		g.writeLine("")
 	}
+
+	// 4.5 生成 Class() 方法
+	g.generateClassMethod_Class(className)
+	g.writeLine("")
 }
 
 // generateChildClassConstructor 生成子类构造函数
@@ -2956,7 +3012,21 @@ func (g *CodeGen) generateStaticAccessExpr(expr *parser.StaticAccessExpr) string
 	}
 
 	memberName := expr.Member
-	goClassName := symbol.ToGoName(className, true)
+	
+	// 确定类是否是公开的
+	isClassPublic := true
+	if classDecl != nil {
+		isClassPublic = classDecl.Public
+	}
+	goClassName := symbol.ToGoName(className, isClassPublic)
+
+	// 特殊处理: ClassName::class 返回类信息
+	if memberName == "class" {
+		// 需要导入 tugo/lang 包
+		g.tugoImports["tugo/lang"] = "lang"
+		infoVarName := fmt.Sprintf("_%s_classInfo", goClassName)
+		return pkgPrefix + infoVarName
+	}
 
 	// 在静态类中查找成员
 	if classDecl != nil {
@@ -3259,12 +3329,31 @@ func (g *CodeGen) generateNewExpr(expr *parser.NewExpr) string {
 		pkgPrefix = pkg + "."
 	}
 
-	goClassName := symbol.ToGoName(className, true)
+	// 查找类声明以确定是否公开和是否有 init 参数
+	classDecl := g.transpiler.GetClassDecl(g.transpiler.pkg, className)
+	isClassPublic := true
+	hasInitParams := false  // 是否有 init 参数（需要 opts 模式）
+	if classDecl != nil {
+		isClassPublic = classDecl.Public
+		// 检查是否有 init 方法且有参数
+		if classDecl.InitMethod != nil && len(classDecl.InitMethod.Params) > 0 {
+			hasInitParams = true
+		}
+	} else {
+		// 外部包的类，无法获取类声明，保持原有行为（使用 opts 模式）
+		// 这是更安全的默认行为，因为大多数类都有构造参数
+		hasInitParams = true
+	}
+	goClassName := symbol.ToGoName(className, isClassPublic)
 
 	// 生成构造函数调用
 	if len(expr.Arguments) == 0 {
-		// 无参数: NewClassName(NewDefaultClassNameInitOpts())
-		return fmt.Sprintf("%sNew%s(%sNewDefault%sInitOpts())", pkgPrefix, goClassName, pkgPrefix, goClassName)
+		if hasInitParams {
+			// 有 init 参数: NewClassName(NewDefaultClassNameInitOpts())
+			return fmt.Sprintf("%sNew%s(%sNewDefault%sInitOpts())", pkgPrefix, goClassName, pkgPrefix, goClassName)
+		}
+		// 无 init 参数: NewClassName()
+		return fmt.Sprintf("%sNew%s()", pkgPrefix, goClassName)
 	}
 
 	// 有参数: 生成 opts 结构体

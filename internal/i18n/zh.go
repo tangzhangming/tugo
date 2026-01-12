@@ -109,6 +109,7 @@ var zhMessages = map[string]string{
 	MsgStdlibPkgNotFound: "警告: 标准库包未找到: %s",
 	MsgParsingStdlib:     "正在解析标准库: %s",
 	MsgTranspilingStdlib: "正在转译标准库: %s -> %s",
+	MsgCopyingStdlib:     "正在复制标准库: %s -> %s",
 	ErrStdlibReadError:   "无法读取标准库文件",
 	ErrStdlibParseError:  "标准库 %s 解析错误: %s",
 	ErrStdlibWriteError:  "无法写入标准库文件",

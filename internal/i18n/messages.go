@@ -111,12 +111,13 @@ const (
 	MsgGeneratedGoMod   = "cli.generated_gomod"          // args: module
 
 	// Stdlib messages
-	MsgStdlibNotFound   = "cli.stdlib_not_found"         // args: path
-	MsgStdlibPkgNotFound = "cli.stdlib_pkg_not_found"    // args: pkgPath
-	MsgParsingStdlib    = "cli.parsing_stdlib"           // args: path
-	MsgTranspilingStdlib = "cli.transpiling_stdlib"      // args: input, output
-	ErrStdlibReadError  = "cli.stdlib_read_error"        // args: path, error
-	ErrStdlibParseError = "cli.stdlib_parse_error"       // args: path, error
-	ErrStdlibWriteError = "cli.stdlib_write_error"       // args: path, error
-	ErrStdlibTranspile  = "cli.stdlib_transpile_error"   // args: error
+	MsgStdlibNotFound    = "cli.stdlib_not_found"         // args: path
+	MsgStdlibPkgNotFound = "cli.stdlib_pkg_not_found"     // args: pkgPath
+	MsgParsingStdlib     = "cli.parsing_stdlib"           // args: path
+	MsgTranspilingStdlib = "cli.transpiling_stdlib"       // args: input, output
+	MsgCopyingStdlib     = "cli.copying_stdlib"           // args: input, output
+	ErrStdlibReadError   = "cli.stdlib_read_error"        // args: path, error
+	ErrStdlibParseError  = "cli.stdlib_parse_error"       // args: path, error
+	ErrStdlibWriteError  = "cli.stdlib_write_error"       // args: path, error
+	ErrStdlibTranspile   = "cli.stdlib_transpile_error"   // args: error
 )

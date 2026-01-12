@@ -50,11 +50,22 @@ func (e *stdlibError) Error() string {
 func collectTugoImports(files []*parser.File) map[string]bool {
 	imports := make(map[string]bool)
 	for _, file := range files {
+		// 收集显式导入
 		for _, imp := range file.Imports {
 			for _, spec := range imp.Specs {
 				if spec.FromTugo {
 					// tugo.lang.Str -> tugo/lang
 					imports[spec.PkgPath] = true
+				}
+			}
+		}
+		
+		// 检测是否有非静态类声明（需要隐式导入 tugo.lang 用于 ClassInfo）
+		for _, stmt := range file.Statements {
+			if classDecl, ok := stmt.(*parser.ClassDecl); ok {
+				if !classDecl.Static {
+					imports["tugo.lang"] = true
+					break // 只需要检测到一个就够了
 				}
 			}
 		}
@@ -93,7 +104,7 @@ func transpileStdlib(stdlibDir, outputDir string, tugoImports map[string]bool, v
 			return &createDirError{path: outPkgDir, err: err}
 		}
 
-		// 转译该包下的所有 .tugo 文件
+		// 读取目录内容
 		entries, err := os.ReadDir(srcDir)
 		if err != nil {
 			return &stdlibReadDirError{path: srcDir, err: err}
@@ -102,7 +113,7 @@ func transpileStdlib(stdlibDir, outputDir string, tugoImports map[string]bool, v
 		var pkgFiles []*parser.File
 		var fileNames []string
 
-		// 第一遍：解析所有文件
+		// 第一遍：解析所有 .tugo 文件
 		for _, entry := range entries {
 			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tugo") {
 				continue
@@ -127,7 +138,30 @@ func transpileStdlib(stdlibDir, outputDir string, tugoImports map[string]bool, v
 			}
 		}
 
+		// 复制所有 .go 文件（预编译的 Go 代码，如 class_info.go）
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
+				continue
+			}
+
+			srcFile := filepath.Join(srcDir, entry.Name())
+			source, err := os.ReadFile(srcFile)
+			if err != nil {
+				return &stdlibReadFileError{path: srcFile, err: err}
+			}
+
+			outFile := filepath.Join(outPkgDir, entry.Name())
+			if err := os.WriteFile(outFile, source, 0644); err != nil {
+				return &stdlibWriteError{path: outFile, err: err}
+			}
+
+			if verbose {
+				printInfo(i18n.T(i18n.MsgCopyingStdlib, entry.Name(), outFile))
+			}
+		}
+
 		if len(pkgFiles) == 0 {
+			// 没有 .tugo 文件，只有 .go 文件（已复制完成）
 			continue
 		}
 

@@ -109,6 +109,7 @@ var enMessages = map[string]string{
 	MsgStdlibPkgNotFound: "Warning: stdlib package not found: %s",
 	MsgParsingStdlib:     "Parsing stdlib: %s",
 	MsgTranspilingStdlib: "Transpiling stdlib: %s -> %s",
+	MsgCopyingStdlib:     "Copying stdlib: %s -> %s",
 	ErrStdlibReadError:   "cannot read stdlib file",
 	ErrStdlibParseError:  "parse error in stdlib %s: %s",
 	ErrStdlibWriteError:  "cannot write stdlib file",
