@@ -1773,6 +1773,23 @@ func (g *CodeGen) getTypeZeroValue(typ parser.Expression) string {
 
 // generateTryStmt 生成 try-catch 语句
 func (g *CodeGen) generateTryStmt(stmt *parser.TryStmt) {
+	// 检测 try 块内是否有需要错误处理的代码
+	needsErrorHandling := g.tryBlockNeedsErrorHandling(stmt.Body.Statements)
+
+	if !needsErrorHandling {
+		// 简化模式：try 块内没有 throw 或 errable 调用，直接生成普通代码块
+		g.writeLine("{")
+		g.indent++
+		for _, s := range stmt.Body.Statements {
+			g.generateStatement(s)
+		}
+		g.indent--
+		g.writeLine("}")
+		// catch 块不会被执行，可以省略
+		return
+	}
+
+	// 完整模式：需要错误处理机制
 	g.tryCounter++
 	labelName := fmt.Sprintf("_TryBlock_%d", g.tryCounter)
 	errVarName := fmt.Sprintf("_tryErr_%d", g.tryCounter)
@@ -1826,6 +1843,76 @@ func (g *CodeGen) generateTryStmt(stmt *parser.TryStmt) {
 	g.indent--
 	g.writeLine("}")
 	// tryCounter持续递增，不需要递减
+}
+
+// tryBlockNeedsErrorHandling 检测 try 块内是否有需要错误处理的代码
+// 返回 true 如果有 throw 语句或 errable 函数调用
+func (g *CodeGen) tryBlockNeedsErrorHandling(statements []parser.Statement) bool {
+	for _, stmt := range statements {
+		if g.statementNeedsErrorHandling(stmt) {
+			return true
+		}
+	}
+	return false
+}
+
+// statementNeedsErrorHandling 递归检测语句是否需要错误处理
+func (g *CodeGen) statementNeedsErrorHandling(stmt parser.Statement) bool {
+	switch s := stmt.(type) {
+	case *parser.ThrowStmt:
+		// throw 语句需要错误处理
+		return true
+	case *parser.ShortVarDecl:
+		// 检查右侧是否有 errable 调用
+		if g.isErrableCall(s.Value) || g.containsErrableCall(s.Value) {
+			return true
+		}
+	case *parser.AssignStmt:
+		// 检查右侧是否有 errable 调用
+		for _, expr := range s.Right {
+			if g.isErrableCall(expr) || g.containsErrableCall(expr) {
+				return true
+			}
+		}
+	case *parser.ExpressionStmt:
+		// 检查表达式是否有 errable 调用
+		if g.isErrableCall(s.Expression) || g.containsErrableCall(s.Expression) {
+			return true
+		}
+	case *parser.IfStmt:
+		// 递归检查 if 块
+		if s.Consequence != nil {
+			if g.tryBlockNeedsErrorHandling(s.Consequence.Statements) {
+				return true
+			}
+		}
+		// Alternative 可能是 BlockStmt 或 IfStmt（else if）
+		if s.Alternative != nil {
+			if g.statementNeedsErrorHandling(s.Alternative) {
+				return true
+			}
+		}
+	case *parser.ForStmt:
+		// 递归检查 for 块
+		if s.Body != nil {
+			if g.tryBlockNeedsErrorHandling(s.Body.Statements) {
+				return true
+			}
+		}
+	case *parser.RangeStmt:
+		// 递归检查 range 块
+		if s.Body != nil {
+			if g.tryBlockNeedsErrorHandling(s.Body.Statements) {
+				return true
+			}
+		}
+	case *parser.BlockStmt:
+		// 递归检查代码块
+		if g.tryBlockNeedsErrorHandling(s.Statements) {
+			return true
+		}
+	}
+	return false
 }
 
 // generateTryBlockStatements 生成 try 块中的语句，为 errable 调用插入错误检查
