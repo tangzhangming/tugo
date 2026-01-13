@@ -49,6 +49,8 @@ type OverloadedMethod struct {
 	Symbol      *Symbol  // 原符号
 	MangledName string   // 修饰后的名称
 	ParamTypes  []string // 参数类型签名
+	HasDefaults bool     // 是否有默认参数
+	ParamNames  []string // 参数名列表（用于生成 Opts 调用）
 }
 
 // InterfaceInfo 存储接口的完整信息
@@ -305,10 +307,16 @@ func (t *Table) AddOverloadGroup(pkg, receiver, name string, sym *Symbol, params
 		t.overloadGroups[key] = group
 	}
 
-	// 生成参数类型列表
+	// 生成参数类型列表和参数名列表，检查是否有默认值
 	var paramTypes []string
+	var paramNames []string
+	hasDefaults := false
 	for _, p := range params {
 		paramTypes = append(paramTypes, GenerateTypeSignature(p.Type))
+		paramNames = append(paramNames, p.Name)
+		if p.DefaultValue != nil {
+			hasDefaults = true
+		}
 	}
 
 	// 添加重载方法
@@ -316,6 +324,8 @@ func (t *Table) AddOverloadGroup(pkg, receiver, name string, sym *Symbol, params
 		Symbol:      sym,
 		MangledName: sym.MangledName,
 		ParamTypes:  paramTypes,
+		HasDefaults: hasDefaults,
+		ParamNames:  paramNames,
 	}
 	group.Methods = append(group.Methods, method)
 }

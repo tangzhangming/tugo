@@ -448,7 +448,7 @@ func (g *CodeGen) generateFuncDecl(decl *parser.FuncDecl) {
 // generateFuncWithDefaults 生成带默认参数的函数
 func (g *CodeGen) generateFuncWithDefaults(decl *parser.FuncDecl) {
 	funcName := symbol.ToGoName(decl.Name, decl.Public)
-	optsName := funcName + "Opts"
+	optsName := funcName + "__Opts"
 
 	// 生成 Options 结构体
 	g.writeLine(fmt.Sprintf("type %s struct {", optsName))
@@ -463,7 +463,7 @@ func (g *CodeGen) generateFuncWithDefaults(decl *parser.FuncDecl) {
 	g.writeLine("")
 
 	// 生成默认值构造器
-	g.writeLine(fmt.Sprintf("func NewDefault%s() %s {", optsName, optsName))
+	g.writeLine(fmt.Sprintf("func NewDefault__%s() %s {", optsName, optsName))
 	g.indent++
 	var defaultFields []string
 	for _, param := range decl.Params {
@@ -597,7 +597,7 @@ func (g *CodeGen) generateStructConstructor(decl *parser.StructDecl, structName 
 
 	if hasDefaults {
 		// 生成 Opts 结构体
-		optsName := structName + "InitOpts"
+		optsName := structName + "__InitOpts"
 		g.writeLine(fmt.Sprintf("type %s struct {", optsName))
 		g.indent++
 		for _, param := range init.Params {
@@ -610,7 +610,7 @@ func (g *CodeGen) generateStructConstructor(decl *parser.StructDecl, structName 
 		g.writeLine("")
 
 		// 生成 NewDefaultOpts 函数
-		g.writeLine(fmt.Sprintf("func NewDefault%s() %s {", optsName, optsName))
+		g.writeLine(fmt.Sprintf("func NewDefault__%s() %s {", optsName, optsName))
 		g.indent++
 		g.write(fmt.Sprintf("return %s{", optsName))
 		first := true
@@ -630,7 +630,7 @@ func (g *CodeGen) generateStructConstructor(decl *parser.StructDecl, structName 
 		g.writeLine("")
 
 		// 生成构造函数（使用 Opts）
-		g.writeLine(fmt.Sprintf("func New%s(opts %s) *%s {", structName, optsName, structName))
+		g.writeLine(fmt.Sprintf("func New__%s(opts %s) *%s {", structName, optsName, structName))
 		g.indent++
 		g.writeLine(fmt.Sprintf("s := &%s{}", structName))
 
@@ -657,7 +657,7 @@ func (g *CodeGen) generateStructConstructor(decl *parser.StructDecl, structName 
 		g.writeLine("}")
 	} else {
 		// 没有默认参数，直接生成构造函数
-		g.write(fmt.Sprintf("func New%s(", structName))
+		g.write(fmt.Sprintf("func New__%s(", structName))
 		g.generateParams(init.Params)
 		g.writeLine(fmt.Sprintf(") *%s {", structName))
 		g.indent++
@@ -1118,7 +1118,7 @@ func (g *CodeGen) generateChildClassConstructor(decl *parser.ClassDecl, classNam
 func (g *CodeGen) generateChildClassConstructorSimple(decl *parser.ClassDecl, className string, parentInfo *symbol.ClassInfo) {
 	init := decl.InitMethod
 	g.writeIndent()
-	g.write(fmt.Sprintf("func New%s(", className))
+	g.write(fmt.Sprintf("func New__%s(", className))
 
 	// 参数
 	for i, param := range init.Params {
@@ -1173,7 +1173,7 @@ func (g *CodeGen) generateChildClassConstructorSimple(decl *parser.ClassDecl, cl
 // generateChildClassConstructorWithDefaults 生成带默认参数的子类构造函数
 func (g *CodeGen) generateChildClassConstructorWithDefaults(decl *parser.ClassDecl, className string, parentInfo *symbol.ClassInfo) {
 	init := decl.InitMethod
-	optsName := fmt.Sprintf("%sInitOpts", className)
+	optsName := fmt.Sprintf("%s__InitOpts", className)
 
 	// 生成 Opts 结构体
 	g.writeLine(fmt.Sprintf("type %s struct {", optsName))
@@ -1188,7 +1188,7 @@ func (g *CodeGen) generateChildClassConstructorWithDefaults(decl *parser.ClassDe
 	g.writeLine("")
 
 	// 生成默认值构造器
-	g.writeLine(fmt.Sprintf("func NewDefault%s() %s {", optsName, optsName))
+	g.writeLine(fmt.Sprintf("func NewDefault__%s() %s {", optsName, optsName))
 	g.indent++
 	var defaultFields []string
 	for _, param := range init.Params {
@@ -1204,7 +1204,7 @@ func (g *CodeGen) generateChildClassConstructorWithDefaults(decl *parser.ClassDe
 	g.writeLine("")
 
 	// 生成构造函数
-	g.writeLine(fmt.Sprintf("func New%s(opts %s) *%s {", className, optsName, className))
+	g.writeLine(fmt.Sprintf("func New__%s(opts %s) *%s {", className, optsName, className))
 	g.indent++
 
 	// 创建实例
@@ -1253,7 +1253,7 @@ func (g *CodeGen) generateChildClassConstructorWithDefaults(decl *parser.ClassDe
 
 // generateChildClassDefaultConstructor 生成子类默认构造函数
 func (g *CodeGen) generateChildClassDefaultConstructor(decl *parser.ClassDecl, className string, parentInfo *symbol.ClassInfo) {
-	g.writeLine(fmt.Sprintf("func New%s() *%s {", className, className))
+	g.writeLine(fmt.Sprintf("func New__%s() *%s {", className, className))
 	g.indent++
 	g.writeLine(fmt.Sprintf("t := &%s{}", className))
 
@@ -1306,7 +1306,7 @@ func (g *CodeGen) generateClassConstructor(decl *parser.ClassDecl, className str
 func (g *CodeGen) generateClassConstructorSimple(decl *parser.ClassDecl, className string) {
 	init := decl.InitMethod
 	g.writeIndent()
-	g.write(fmt.Sprintf("func New%s(", className))
+	g.write(fmt.Sprintf("func New__%s(", className))
 
 	// 参数
 	for i, param := range init.Params {
@@ -1350,7 +1350,7 @@ func (g *CodeGen) generateClassConstructorSimple(decl *parser.ClassDecl, classNa
 // generateClassConstructorWithDefaults 生成带默认参数的构造函数
 func (g *CodeGen) generateClassConstructorWithDefaults(decl *parser.ClassDecl, className string) {
 	init := decl.InitMethod
-	optsName := fmt.Sprintf("%sInitOpts", className)
+	optsName := fmt.Sprintf("%s__InitOpts", className)
 
 	// 生成 Opts 结构体
 	g.writeLine(fmt.Sprintf("type %s struct {", optsName))
@@ -1365,7 +1365,7 @@ func (g *CodeGen) generateClassConstructorWithDefaults(decl *parser.ClassDecl, c
 	g.writeLine("")
 
 	// 生成默认值构造器
-	g.writeLine(fmt.Sprintf("func NewDefault%s() %s {", optsName, optsName))
+	g.writeLine(fmt.Sprintf("func NewDefault__%s() %s {", optsName, optsName))
 	g.indent++
 	var defaultFields []string
 	for _, param := range init.Params {
@@ -1381,7 +1381,7 @@ func (g *CodeGen) generateClassConstructorWithDefaults(decl *parser.ClassDecl, c
 	g.writeLine("")
 
 	// 生成构造函数
-	g.writeLine(fmt.Sprintf("func New%s(opts %s) *%s {", className, optsName, className))
+	g.writeLine(fmt.Sprintf("func New__%s(opts %s) *%s {", className, optsName, className))
 	g.indent++
 
 	// 创建实例
@@ -1436,7 +1436,7 @@ func (g *CodeGen) generateGoMainFunc(decl *parser.ClassDecl, method *parser.Clas
 
 // generateDefaultConstructor 生成默认构造函数
 func (g *CodeGen) generateDefaultConstructor(decl *parser.ClassDecl, className string) {
-	g.writeLine(fmt.Sprintf("func New%s() *%s {", className, className))
+	g.writeLine(fmt.Sprintf("func New__%s() *%s {", className, className))
 	g.indent++
 	g.writeLine(fmt.Sprintf("t := &%s{}", className))
 
@@ -1604,7 +1604,10 @@ func (g *CodeGen) generateClassMethodWithDefaults(className, methodName string, 
 		isPublic := method.Visibility == "public" || method.Visibility == "protected"
 		actualMethodName = symbol.GenerateMangledName(method.Name, method.Params, isPublic)
 	}
-	optsName := fmt.Sprintf("%s%sOpts", className, actualMethodName)
+	optsName := fmt.Sprintf("%s__%s__Opts", className, actualMethodName)
+
+	// 获取接收者名称，避免和参数名冲突
+	receiverName := getReceiverName(method.Params, "t")
 
 	// 生成 Opts 结构体
 	g.writeLine(fmt.Sprintf("type %s struct {", optsName))
@@ -1619,7 +1622,7 @@ func (g *CodeGen) generateClassMethodWithDefaults(className, methodName string, 
 	g.writeLine("")
 
 	// 生成默认值构造器
-	g.writeLine(fmt.Sprintf("func NewDefault%s() %s {", optsName, optsName))
+	g.writeLine(fmt.Sprintf("func NewDefault__%s() %s {", optsName, optsName))
 	g.indent++
 	var defaultFields []string
 	for _, param := range method.Params {
@@ -1636,7 +1639,7 @@ func (g *CodeGen) generateClassMethodWithDefaults(className, methodName string, 
 
 	// 生成方法
 	g.writeIndent()
-	g.write(fmt.Sprintf("func (t *%s) %s(opts %s)", className, actualMethodName, optsName))
+	g.write(fmt.Sprintf("func (%s *%s) %s(opts %s)", receiverName, className, actualMethodName, optsName))
 
 	// 返回值
 	if len(method.Results) > 0 {
@@ -1684,11 +1687,13 @@ func (g *CodeGen) generateClassMethodWithDefaults(className, methodName string, 
 		varName := symbol.TransformDollarVar(param.Name)
 		fieldName := symbol.ToGoName(param.Name, true)
 		g.writeLine(fmt.Sprintf("%s := opts.%s", varName, fieldName))
+		// 添加 _ = varName 以避免未使用变量的编译错误
+		g.writeLine(fmt.Sprintf("_ = %s", varName))
 	}
 
 	// 方法体
 	if method.Body != nil {
-		g.currentReceiver = "t"
+		g.currentReceiver = receiverName
 		g.currentFuncErrable = method.Errable
 		g.currentFuncResults = method.Results
 		for _, stmt := range method.Body.Statements {
@@ -2971,9 +2976,16 @@ func (g *CodeGen) generateCallExpr(expr *parser.CallExpr) string {
 			
 			// 检查是否有重载
 			if g.transpiler.table.IsMethodOverloaded(classPkg, receiverType, methodName) {
-				// 解析重载方法
-				mangledName := g.resolveOverloadedMethodInPkg(classPkg, receiverType, methodName, expr.Arguments)
+				// 解析重载方法，同时获取方法信息
+				mangledName, overloadMethod := g.resolveOverloadedMethodWithInfo(classPkg, receiverType, methodName, expr.Arguments)
 				x := g.generateExpression(sel.X)
+				
+				// 检查是否需要使用 Opts 模式
+				if overloadMethod != nil && overloadMethod.HasDefaults {
+					// 生成 Opts 结构体调用
+					return g.generateOptsCall(x, classPkg, receiverType, mangledName, overloadMethod, expr.Arguments)
+				}
+				
 				var args []string
 				for _, arg := range expr.Arguments {
 					args = append(args, g.generateExpression(arg))
@@ -3074,11 +3086,11 @@ func (g *CodeGen) getReceiverType(expr parser.Expression) string {
 // generateDefaultParamCall 生成带默认参数函数的调用
 func (g *CodeGen) generateDefaultParamCall(sym *symbol.Symbol, args []parser.Expression) string {
 	funcName := sym.GoName
-	optsName := funcName + "Opts"
+	optsName := funcName + "__Opts"
 
 	// 如果没有参数，使用默认值构造器
 	if len(args) == 0 {
-		return funcName + "(NewDefault" + optsName + "())"
+		return funcName + "(NewDefault__" + optsName + "())"
 	}
 
 	// 获取函数的参数信息
@@ -3566,11 +3578,11 @@ func (g *CodeGen) generateNewExpr(expr *parser.NewExpr) string {
 	// 生成构造函数调用
 	if len(expr.Arguments) == 0 {
 		if hasInitParams {
-			// 有 init 参数: NewClassName(NewDefaultClassNameInitOpts())
-			return fmt.Sprintf("%sNew%s(%sNewDefault%sInitOpts())", pkgPrefix, goClassName, pkgPrefix, goClassName)
+			// 有 init 参数: New__ClassName(NewDefault__ClassName__InitOpts())
+			return fmt.Sprintf("%sNew__%s(%sNewDefault__%s__InitOpts())", pkgPrefix, goClassName, pkgPrefix, goClassName)
 		}
-		// 无 init 参数: NewClassName()
-		return fmt.Sprintf("%sNew%s()", pkgPrefix, goClassName)
+		// 无 init 参数: New__ClassName()
+		return fmt.Sprintf("%sNew__%s()", pkgPrefix, goClassName)
 	}
 
 	// 有参数: 生成 opts 结构体
@@ -3579,8 +3591,8 @@ func (g *CodeGen) generateNewExpr(expr *parser.NewExpr) string {
 		argStrs = append(argStrs, g.generateExpression(arg))
 	}
 
-	// 生成: NewClassName(ClassNameInitOpts{args...})
-	return fmt.Sprintf("%sNew%s(%s%sInitOpts{%s})", pkgPrefix, goClassName, pkgPrefix, goClassName, strings.Join(argStrs, ", "))
+	// 生成: New__ClassName(ClassName__InitOpts{args...})
+	return fmt.Sprintf("%sNew__%s(%s%s__InitOpts{%s})", pkgPrefix, goClassName, pkgPrefix, goClassName, strings.Join(argStrs, ", "))
 }
 
 // generateType 生成类型
@@ -3687,6 +3699,12 @@ func (g *CodeGen) resolveOverloadedMethod(receiver, methodName string, args []pa
 
 // resolveOverloadedMethodInPkg 在指定包中解析重载方法调用
 func (g *CodeGen) resolveOverloadedMethodInPkg(pkg, receiver, methodName string, args []parser.Expression) string {
+	mangledName, _ := g.resolveOverloadedMethodWithInfo(pkg, receiver, methodName, args)
+	return mangledName
+}
+
+// resolveOverloadedMethodWithInfo 在指定包中解析重载方法调用，同时返回方法信息
+func (g *CodeGen) resolveOverloadedMethodWithInfo(pkg, receiver, methodName string, args []parser.Expression) (string, *symbol.OverloadedMethod) {
 	// 推断参数类型
 	var argTypes []string
 	for _, arg := range args {
@@ -3694,28 +3712,77 @@ func (g *CodeGen) resolveOverloadedMethodInPkg(pkg, receiver, methodName string,
 	}
 
 	// 查找匹配的重载
-	sym := g.transpiler.table.GetOverloadedMethod(pkg, receiver, methodName, argTypes)
-	if sym != nil {
-		return sym.MangledName
-	}
-
-	// 如果精确匹配失败，尝试按参数数量匹配
 	group := g.transpiler.table.GetOverloadGroup(pkg, receiver, methodName)
 	if group != nil {
+		// 首先尝试精确匹配
 		for _, method := range group.Methods {
-			if len(method.ParamTypes) == len(args) {
-				// 找到参数数量匹配的版本
-				return method.MangledName
+			if len(method.ParamTypes) == len(argTypes) {
+				match := true
+				for i, pt := range method.ParamTypes {
+					if pt != argTypes[i] && argTypes[i] != "any" {
+						match = false
+						break
+					}
+				}
+				if match {
+					return method.MangledName, method
+				}
 			}
 		}
+		
+		// 如果精确匹配失败，尝试按参数数量匹配
+		for _, method := range group.Methods {
+			if len(method.ParamTypes) == len(args) {
+				return method.MangledName, method
+			}
+		}
+		
 		// 如果还是没找到，返回第一个版本
 		if len(group.Methods) > 0 {
-			return group.Methods[0].MangledName
+			return group.Methods[0].MangledName, group.Methods[0]
 		}
 	}
 
 	// 回退到标准名称转换
-	return symbol.ToGoName(methodName, true)
+	return symbol.ToGoName(methodName, true), nil
+}
+
+// generateOptsCall 生成使用 Opts 结构体的方法调用
+func (g *CodeGen) generateOptsCall(receiver, classPkg, className, mangledName string, method *symbol.OverloadedMethod, args []parser.Expression) string {
+	// 获取 Go 类名（用于 Opts 结构体名）
+	classInfo := g.transpiler.table.GetClass(classPkg, className)
+	goClassName := className
+	if classInfo != nil {
+		goClassName = classInfo.GoName
+	}
+	
+	optsName := goClassName + "__" + mangledName + "__Opts"
+	
+	// 检查是否需要包前缀
+	pkgPrefix := ""
+	if classPkg != g.transpiler.pkg {
+		// 跨包调用，需要添加包前缀
+		// 从 typeToPackage 获取导入别名
+		for typeName, pkgName := range g.typeToPackage {
+			if typeName == className {
+				pkgPrefix = pkgName + "."
+				break
+			}
+		}
+	}
+	
+	// 生成 Opts 结构体字面量
+	var fields []string
+	for i, arg := range args {
+		if i < len(method.ParamNames) {
+			fieldName := symbol.ToGoName(method.ParamNames[i], true)
+			argVal := g.generateExpression(arg)
+			fields = append(fields, fmt.Sprintf("%s: %s", fieldName, argVal))
+		}
+	}
+	
+	optsLiteral := pkgPrefix + optsName + "{" + strings.Join(fields, ", ") + "}"
+	return receiver + "." + mangledName + "(" + optsLiteral + ")"
 }
 
 // write 写入内容
