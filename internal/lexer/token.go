@@ -118,7 +118,9 @@ const (
 	TOKEN_ABSTRACT   // abstract
 	TOKEN_EXTENDS    // extends
 	TOKEN_SELF       // self
-	TOKEN_FROM       // from (用于 import "fmt" from golang)
+	TOKEN_FROM       // from (保留，向后兼容)
+	TOKEN_USE        // use (用于导入 tugo 包)
+	TOKEN_AS         // as (用于 use 别名)
 
 	// 错误处理关键字
 	TOKEN_TRY   // try
@@ -183,6 +185,8 @@ var keywords = map[string]TokenType{
 	"extends":    TOKEN_EXTENDS,
 	"self":       TOKEN_SELF,
 	"from":       TOKEN_FROM,
+	"use":        TOKEN_USE,
+	"as":         TOKEN_AS,
 	"try":        TOKEN_TRY,
 	"catch":      TOKEN_CATCH,
 	"throw":      TOKEN_THROW,
@@ -281,6 +285,8 @@ func TokenTypeName(t TokenType) string {
 		TOKEN_EXTENDS:    "extends",
 		TOKEN_SELF:       "self",
 		TOKEN_FROM:       "from",
+		TOKEN_USE:        "use",
+		TOKEN_AS:         "as",
 		TOKEN_TRY:        "try",
 		TOKEN_CATCH:      "catch",
 		TOKEN_THROW:      "throw",

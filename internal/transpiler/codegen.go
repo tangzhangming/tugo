@@ -84,11 +84,11 @@ func (g *CodeGen) Generate(file *parser.File) string {
 
 // processImportSpec 处理单个导入项
 func (g *CodeGen) processImportSpec(spec *parser.ImportSpec) {
-	if spec.FromGo {
-		// Go 标准库导入
+	if spec.IsGoImport {
+		// Go 包导入（import 语句）
 		g.goImports[spec.Path] = true
 	} else if spec.TypeName != "" {
-		// tugo 风格导入 (com.company.demo.models.User)
+		// tugo 包导入（use 语句）
 		// 记录类型名到包名的映射
 		typeName := spec.TypeName
 		if spec.Alias != "" {

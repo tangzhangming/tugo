@@ -1033,8 +1033,8 @@ func (t *Transpiler) validateUnusedImports(file *parser.File) {
 	importedTypes := make(map[string]*parser.ImportSpec)
 	for _, imp := range file.Imports {
 		for _, spec := range imp.Specs {
-			// 跳过 Go 标准库导入（如 fmt，可能被 println 等内置函数使用）
-			if spec.FromGo {
+			// 跳过 Go 包导入（如 fmt，可能被 println 等内置函数使用）
+			if spec.IsGoImport {
 				continue
 			}
 			
@@ -1264,8 +1264,8 @@ func (t *Transpiler) validateVisibility(file *parser.File) {
 	typeToPackage := make(map[string]string)
 	for _, impDecl := range file.Imports {
 		for _, spec := range impDecl.Specs {
-			if spec.FromGo {
-				continue // 跳过 Go 标准库导入
+			if spec.IsGoImport {
+				continue // 跳过 Go 包导入
 			}
 			// 获取类型名
 			typeName := spec.TypeName

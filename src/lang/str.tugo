@@ -1,6 +1,6 @@
 package lang
 
-import "strings" from golang
+import "strings"
 
 // Str 字符串工具类
 public static class Str {

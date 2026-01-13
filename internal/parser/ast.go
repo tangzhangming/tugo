@@ -41,13 +41,12 @@ func (i *ImportDecl) statementNode()       {}
 
 // ImportSpec 单个导入项
 type ImportSpec struct {
-	Alias    string // 别名（可选）
-	Path     string // 完整导入路径 (如 "com.company.demo.models.User")
-	TypeName string // 类型名（最后一截，如 "User"）
-	PkgPath  string // 包路径（去掉类型名后，如 "com.company.demo.models"）
-	PkgName  string // 包名（最后一个目录名，如 "models"）
-	FromGo   bool   // 是否来自 golang 标准库 (import "fmt" from golang)
-	FromTugo bool   // 是否来自 tugo 标准库 (import "tugo.lang.Str")
+	Alias      string // 别名（可选）
+	Path       string // 完整导入路径 (如 "com.company.demo.models.User" 或 "fmt")
+	TypeName   string // 类型名（use语句：最后一截，如 "User"）
+	PkgPath    string // 包路径（use语句：去掉类型名后，如 "com.company.demo.models"）
+	PkgName    string // 包名（use语句：最后一个目录名，如 "models"）
+	IsGoImport bool   // true=Go包(import语句), false=tugo包(use语句)
 }
 
 // FuncDecl 函数声明

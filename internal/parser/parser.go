@@ -84,11 +84,18 @@ func (p *Parser) ParseFile() *File {
 		}
 	}
 
-	// 解析 import 声明
-	for p.curTokenIs(lexer.TOKEN_IMPORT) {
-		imp := p.parseImportDecl()
-		if imp != nil {
-			file.Imports = append(file.Imports, imp)
+	// 解析 use 和 import 声明（可以交错出现）
+	for p.curTokenIs(lexer.TOKEN_USE) || p.curTokenIs(lexer.TOKEN_IMPORT) {
+		if p.curTokenIs(lexer.TOKEN_USE) {
+			imp := p.parseUseDecl()
+			if imp != nil {
+				file.Imports = append(file.Imports, imp)
+			}
+		} else {
+			imp := p.parseImportDecl()
+			if imp != nil {
+				file.Imports = append(file.Imports, imp)
+			}
 		}
 	}
 
@@ -104,7 +111,15 @@ func (p *Parser) ParseFile() *File {
 	return file
 }
 
-// parseImportDecl 解析 import 声明
+// parseImportDecl 解析 import 声明（Go 包导入，语法与 Go 完全一致）
+// import "fmt"
+// import f "fmt"
+// import . "fmt"
+// import (
+//     "fmt"
+//     "os"
+//     f "fmt"
+// )
 func (p *Parser) parseImportDecl() *ImportDecl {
 	decl := &ImportDecl{Token: p.curToken}
 	p.nextToken()
@@ -113,7 +128,7 @@ func (p *Parser) parseImportDecl() *ImportDecl {
 		// 多行导入
 		p.nextToken()
 		for !p.curTokenIs(lexer.TOKEN_RPAREN) && !p.curTokenIs(lexer.TOKEN_EOF) {
-			spec := p.parseImportSpec()
+			spec := p.parseGoImportSpec()
 			if spec != nil {
 				decl.Specs = append(decl.Specs, spec)
 			}
@@ -122,27 +137,42 @@ func (p *Parser) parseImportDecl() *ImportDecl {
 		p.nextToken() // 消费 )
 	} else {
 		// 单行导入
-		spec := p.parseImportSpec()
+		spec := p.parseGoImportSpec()
 		if spec != nil {
 			decl.Specs = append(decl.Specs, spec)
 		}
-		p.nextToken() // 消费最后一个 token，准备下一个 import 或语句
+		p.nextToken() // 消费最后一个 token，准备下一个 import/use 或语句
 	}
 
 	return decl
 }
 
-// parseImportSpec 解析单个导入项
-// 支持的语法:
-// - import "com.company.demo.models.User"  (tugo 风格，最后一截是类型名)
-// - import Helper "com.company.demo.utils.StringHelper"  (带别名)
-// - import "fmt" from golang  (Go 标准库)
-// - import "tugo.lang.Str"  (tugo 标准库)
-func (p *Parser) parseImportSpec() *ImportSpec {
-	spec := &ImportSpec{}
+// parseUseDecl 解析 use 声明（tugo 包导入）
+// use "com.company.demo.models.User"
+// use "com.company.demo.models.User" as UserModel
+func (p *Parser) parseUseDecl() *ImportDecl {
+	decl := &ImportDecl{Token: p.curToken}
+	p.nextToken()
+
+	// use 语句只支持单行导入
+	spec := p.parseTugoImportSpec()
+	if spec != nil {
+		decl.Specs = append(decl.Specs, spec)
+	}
+	p.nextToken() // 消费最后一个 token，准备下一个 import/use 或语句
+
+	return decl
+}
+
+// parseGoImportSpec 解析单个 Go 包导入项
+// "fmt"
+// f "fmt"
+// . "fmt"
+func (p *Parser) parseGoImportSpec() *ImportSpec {
+	spec := &ImportSpec{IsGoImport: true}
 
 	// 检查是否有别名
-	if p.curTokenIs(lexer.TOKEN_IDENT) && !p.curTokenIs(lexer.TOKEN_FROM) {
+	if p.curTokenIs(lexer.TOKEN_IDENT) {
 		spec.Alias = p.curToken.Literal
 		p.nextToken()
 	} else if p.curTokenIs(lexer.TOKEN_DOT) {
@@ -156,36 +186,52 @@ func (p *Parser) parseImportSpec() *ImportSpec {
 		if len(spec.Path) >= 2 {
 			spec.Path = spec.Path[1 : len(spec.Path)-1]
 		}
-
-		// 检查是否有 from golang
-		if p.peekTokenIs(lexer.TOKEN_FROM) {
-			p.nextToken() // 消费 from
-			p.nextToken() // 消费 golang
-			if p.curTokenIs(lexer.TOKEN_IDENT) && p.curToken.Literal == "golang" {
-				spec.FromGo = true
-				// Go 标准库，Path 就是包名，如 "fmt"
-				spec.PkgPath = spec.Path
-				spec.PkgName = spec.Path
-			}
-		} else {
-			// 解析 tugo 风格的导入路径
-			p.parseImportPath(spec)
+		// Go 包导入，Path 就是包路径和包名
+		spec.PkgPath = spec.Path
+		spec.PkgName = spec.Path
+		// 获取包名（路径的最后一部分）
+		if idx := lastIndex(spec.Path, '/'); idx >= 0 {
+			spec.PkgName = spec.Path[idx+1:]
 		}
 	}
 
 	return spec
 }
 
-// parseImportPath 解析 tugo 风格的导入路径
-// "com.company.demo.models.User" -> PkgPath="com.company.demo.models", TypeName="User", PkgName="models"
-// "tugo.lang.Str" -> FromTugo=true, PkgPath="tugo.lang", TypeName="Str", PkgName="lang"
-func (p *Parser) parseImportPath(spec *ImportSpec) {
-	path := spec.Path
+// parseTugoImportSpec 解析单个 tugo 包导入项
+// "com.company.demo.models.User"
+// "com.company.demo.models.User" as UserModel
+func (p *Parser) parseTugoImportSpec() *ImportSpec {
+	spec := &ImportSpec{IsGoImport: false}
 
-	// 检查是否是 tugo 标准库
-	if len(path) >= 5 && path[:5] == "tugo." {
-		spec.FromTugo = true
+	if p.curTokenIs(lexer.TOKEN_STRING) {
+		spec.Path = p.curToken.Literal
+		// 去掉引号
+		if len(spec.Path) >= 2 {
+			spec.Path = spec.Path[1 : len(spec.Path)-1]
+		}
+
+		// 检查是否有 as 别名
+		if p.peekTokenIs(lexer.TOKEN_AS) {
+			p.nextToken() // 消费 as
+			p.nextToken() // 移动到别名
+			if p.curTokenIs(lexer.TOKEN_IDENT) {
+				spec.Alias = p.curToken.Literal
+			}
+		}
+
+		// 解析 tugo 风格的导入路径
+		p.parseUsePath(spec)
 	}
+
+	return spec
+}
+
+// parseUsePath 解析 use 语句的导入路径
+// "com.company.demo.models.User" -> PkgPath="com.company.demo.models", TypeName="User", PkgName="models"
+// "tugo.lang.Str" -> PkgPath="tugo.lang", TypeName="Str", PkgName="lang"
+func (p *Parser) parseUsePath(spec *ImportSpec) {
+	path := spec.Path
 
 	// 找到最后一个点
 	lastDot := -1
@@ -214,11 +260,22 @@ func (p *Parser) parseImportPath(spec *ImportSpec) {
 			spec.PkgName = path[:lastDot]
 		}
 	} else {
-		// 没有点，整个就是包名（可能是 Go 标准库或单层包）
+		// 没有点，整个就是包名（可能是单层包）
 		spec.PkgPath = path
 		spec.PkgName = path
 	}
 }
+
+// lastIndex 返回字符在字符串中最后出现的位置
+func lastIndex(s string, c byte) int {
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
 
 // parseStatement 解析语句
 func (p *Parser) parseStatement() Statement {
