@@ -416,6 +416,12 @@ func (p *Parser) parseFuncDecl(public bool, visibility string) *FuncDecl {
 	decl.Name = p.curToken.Literal
 	p.nextToken()
 
+	// 解析泛型类型参数 [T any]
+	if p.curTokenIs(lexer.TOKEN_LBRACKET) {
+		decl.TypeParams = p.parseTypeParams()
+		p.nextToken()
+	}
+
 	// 解析参数列表
 	if !p.curTokenIs(lexer.TOKEN_LPAREN) {
 		p.addError("expected ( after function name")
@@ -535,6 +541,12 @@ func (p *Parser) parseStructDecl(public bool) *StructDecl {
 		return nil
 	}
 	decl.Name = p.curToken.Literal
+
+	// 解析泛型类型参数 [T any]
+	if p.peekTokenIs(lexer.TOKEN_LBRACKET) {
+		p.nextToken()
+		decl.TypeParams = p.parseTypeParams()
+	}
 
 	// 解析 implements 接口列表
 	if p.peekTokenIs(lexer.TOKEN_IMPLEMENTS) {
@@ -777,6 +789,12 @@ func (p *Parser) parseClassDeclFull(public bool, abstract bool, static bool) *Cl
 	}
 	decl.Name = p.curToken.Literal
 
+	// 解析泛型类型参数 [T any]
+	if p.peekTokenIs(lexer.TOKEN_LBRACKET) {
+		p.nextToken()
+		decl.TypeParams = p.parseTypeParams()
+	}
+
 	// 静态类不能有 extends
 	if p.peekTokenIs(lexer.TOKEN_EXTENDS) {
 		if static {
@@ -982,6 +1000,12 @@ func (p *Parser) parseClassMethodWithAbstract(visibility string, isStatic bool, 
 	method.Name = p.curToken.Literal
 	p.nextToken()
 
+	// 解析泛型类型参数 [T any]
+	if p.curTokenIs(lexer.TOKEN_LBRACKET) {
+		method.TypeParams = p.parseTypeParams()
+		p.nextToken()
+	}
+
 	// 参数列表
 	if !p.curTokenIs(lexer.TOKEN_LPAREN) {
 		p.addError("expected ( after method name")
@@ -1060,6 +1084,12 @@ func (p *Parser) parseInterfaceDecl(public bool) *InterfaceDecl {
 	}
 	decl.Name = p.curToken.Literal
 
+	// 解析泛型类型参数 [T any]
+	if p.peekTokenIs(lexer.TOKEN_LBRACKET) {
+		p.nextToken()
+		decl.TypeParams = p.parseTypeParams()
+	}
+
 	if !p.expectPeek(lexer.TOKEN_LBRACE) {
 		return nil
 	}
@@ -1127,6 +1157,12 @@ func (p *Parser) parseTypeDecl(public bool) *TypeDecl {
 	}
 	decl.Name = p.curToken.Literal
 	p.nextToken()
+
+	// 解析泛型类型参数 [T any]
+	if p.curTokenIs(lexer.TOKEN_LBRACKET) {
+		decl.TypeParams = p.parseTypeParams()
+		p.nextToken()
+	}
 
 	decl.Type = p.parseType()
 
@@ -2421,6 +2457,7 @@ func (p *Parser) parseMakeExpression() Expression {
 // 支持两种语法:
 // 1. Go 风格: new(Type)
 // 2. OOP 风格: new ClassName() 或 new ClassName(arg1, arg2)
+// 3. 泛型: new ClassName[T]() 或 new ClassName[T](arg1, arg2)
 func (p *Parser) parseNewExpression() Expression {
 	expr := &NewExpr{Token: p.curToken}
 
@@ -2435,9 +2472,18 @@ func (p *Parser) parseNewExpression() Expression {
 			return nil
 		}
 	} else if p.peekTokenIs(lexer.TOKEN_IDENT) {
-		// OOP 风格: new ClassName(args)
+		// OOP 风格: new ClassName(args) 或 new ClassName[T](args)
 		p.nextToken() // 消费 ClassName
-		expr.Type = &Identifier{Token: p.curToken, Value: p.curToken.Literal}
+		ident := &Identifier{Token: p.curToken, Value: p.curToken.Literal}
+
+		// 检查是否有泛型类型参数 [T, K, ...]
+		if p.peekTokenIs(lexer.TOKEN_LBRACKET) {
+			p.nextToken() // 消费 [
+			typeArgs := p.parseTypeArgs()
+			expr.Type = &GenericType{Token: ident.Token, Type: ident, TypeArgs: typeArgs}
+		} else {
+			expr.Type = ident
+		}
 
 		// 检查是否有参数列表
 		if p.peekTokenIs(lexer.TOKEN_LPAREN) {
@@ -2614,7 +2660,16 @@ func (p *Parser) parseChanType() Expression {
 func (p *Parser) parseType() Expression {
 	switch p.curToken.Type {
 	case lexer.TOKEN_IDENT:
-		return &Identifier{Token: p.curToken, Value: p.curToken.Literal}
+		ident := &Identifier{Token: p.curToken, Value: p.curToken.Literal}
+		// 检查是否是泛型类型实例化 Type[T1, T2]
+		if p.peekTokenIs(lexer.TOKEN_LBRACKET) {
+			p.nextToken() // 移动到 [
+			args := p.parseTypeArgs()
+			if len(args) > 0 {
+				return &GenericType{Token: ident.Token, Type: ident, TypeArgs: args}
+			}
+		}
+		return ident
 	case lexer.TOKEN_ASTERISK:
 		token := p.curToken
 		p.nextToken()
@@ -2718,4 +2773,114 @@ func Parse(input string) (*File, []string) {
 	p := New(l)
 	file := p.ParseFile()
 	return file, p.Errors()
+}
+
+// parseTypeParams 解析泛型类型参数列表 [T any, K comparable]
+func (p *Parser) parseTypeParams() *TypeParamList {
+	if !p.curTokenIs(lexer.TOKEN_LBRACKET) {
+		return nil
+	}
+
+	list := &TypeParamList{Token: p.curToken}
+	p.nextToken() // 跳过 [
+
+	for !p.curTokenIs(lexer.TOKEN_RBRACKET) && !p.curTokenIs(lexer.TOKEN_EOF) {
+		param := p.parseTypeParam()
+		if param != nil {
+			list.Params = append(list.Params, param)
+		}
+
+		if p.peekTokenIs(lexer.TOKEN_COMMA) {
+			p.nextToken() // 跳过当前 token
+			p.nextToken() // 跳过逗号
+		} else {
+			break
+		}
+	}
+
+	if !p.peekTokenIs(lexer.TOKEN_RBRACKET) {
+		// 当前已经是 ] 或后面是 ]
+		if !p.curTokenIs(lexer.TOKEN_RBRACKET) {
+			p.nextToken()
+		}
+	} else {
+		p.nextToken()
+	}
+
+	return list
+}
+
+// parseTypeParam 解析单个类型参数 T any 或 T comparable 或 T int|string
+func (p *Parser) parseTypeParam() *TypeParam {
+	if !p.curTokenIs(lexer.TOKEN_IDENT) {
+		return nil
+	}
+
+	param := &TypeParam{Name: p.curToken.Literal}
+	p.nextToken()
+
+	// 解析约束
+	param.Constraint = p.parseTypeConstraint()
+
+	return param
+}
+
+// parseTypeConstraint 解析类型约束 (any, comparable, int|string)
+func (p *Parser) parseTypeConstraint() Expression {
+	if p.curTokenIs(lexer.TOKEN_COMMA) || p.curTokenIs(lexer.TOKEN_RBRACKET) {
+		// 没有约束，默认 any
+		return &Identifier{Token: p.curToken, Value: "any"}
+	}
+
+	// 解析第一个类型
+	first := p.parseType()
+	if first == nil {
+		return nil
+	}
+
+	// 检查是否是联合类型
+	if p.peekTokenIs(lexer.TOKEN_BIT_OR) {
+		union := &UnionType{Token: p.curToken, Types: []Expression{first}}
+		for p.peekTokenIs(lexer.TOKEN_BIT_OR) {
+			p.nextToken() // 移动到 |
+			p.nextToken() // 移动到下一个类型
+			t := p.parseType()
+			if t != nil {
+				union.Types = append(union.Types, t)
+			}
+		}
+		return union
+	}
+
+	return first
+}
+
+// parseTypeArgs 解析泛型类型参数 [int, string]
+func (p *Parser) parseTypeArgs() []Expression {
+	if !p.curTokenIs(lexer.TOKEN_LBRACKET) {
+		return nil
+	}
+
+	var args []Expression
+	p.nextToken() // 跳过 [
+
+	for !p.curTokenIs(lexer.TOKEN_RBRACKET) && !p.curTokenIs(lexer.TOKEN_EOF) {
+		t := p.parseType()
+		if t != nil {
+			args = append(args, t)
+		}
+
+		if p.peekTokenIs(lexer.TOKEN_COMMA) {
+			p.nextToken()
+			p.nextToken()
+		} else {
+			break
+		}
+	}
+
+	if p.peekTokenIs(lexer.TOKEN_RBRACKET) {
+		p.nextToken()
+	}
+
+	return args
 }

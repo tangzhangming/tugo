@@ -51,14 +51,15 @@ type ImportSpec struct {
 
 // FuncDecl 函数声明
 type FuncDecl struct {
-	Token    lexer.Token // func token
-	Public   bool        // 是否公开
-	Name     string      // 函数名
-	Receiver *Field      // 接收者（方法时使用）
-	Params   []*Field    // 参数列表
-	Results  []*Field    // 返回值列表
-	Body     *BlockStmt  // 函数体
-	Errable  bool        // 是否可能抛出错误（返回类型带 ! 标记）
+	Token      lexer.Token    // func token
+	Public     bool           // 是否公开
+	Name       string         // 函数名
+	Receiver   *Field         // 接收者（方法时使用）
+	TypeParams *TypeParamList // 泛型类型参数（可选）
+	Params     []*Field       // 参数列表
+	Results    []*Field       // 返回值列表
+	Body       *BlockStmt     // 函数体
+	Errable    bool           // 是否可能抛出错误（返回类型带 ! 标记）
 }
 
 func (f *FuncDecl) TokenLiteral() string { return f.Token.Literal }
@@ -76,6 +77,7 @@ type StructDecl struct {
 	Token      lexer.Token    // struct token
 	Public     bool           // 是否公开
 	Name       string         // 结构体名
+	TypeParams *TypeParamList // 泛型类型参数（可选）
 	Implements []string       // 实现的接口列表
 	Fields     []*StructField // 字段列表
 	Embeds     []string       // 嵌入的类型列表（匿名字段）
@@ -102,6 +104,7 @@ type ClassDecl struct {
 	Abstract        bool           // 是否抽象类
 	Static          bool           // 是否静态类
 	Name            string         // 类名
+	TypeParams      *TypeParamList // 泛型类型参数（可选）
 	Extends         string         // 继承的父类（可选）
 	Implements      []string       // 实现的接口列表
 	Fields          []*ClassField  // 字段列表
@@ -124,15 +127,16 @@ type ClassField struct {
 
 // ClassMethod 类方法
 type ClassMethod struct {
-	Token      lexer.Token // func token
-	Name       string      // 方法名
-	Params     []*Field    // 参数列表
-	Results    []*Field    // 返回值列表
-	Body       *BlockStmt  // 方法体（抽象方法为 nil）
-	Visibility string      // public/private/protected
-	Static     bool        // 是否静态
-	Abstract   bool        // 是否抽象方法
-	Errable    bool        // 是否可能抛出错误（返回类型带 ! 标记）
+	Token      lexer.Token    // func token
+	Name       string         // 方法名
+	TypeParams *TypeParamList // 泛型类型参数（可选）
+	Params     []*Field       // 参数列表
+	Results    []*Field       // 返回值列表
+	Body       *BlockStmt     // 方法体（抽象方法为 nil）
+	Visibility string         // public/private/protected
+	Static     bool           // 是否静态
+	Abstract   bool           // 是否抽象方法
+	Errable    bool           // 是否可能抛出错误（返回类型带 ! 标记）
 }
 
 // ThisExpr this 表达式
@@ -163,10 +167,11 @@ func (s *StaticAccessExpr) expressionNode()      {}
 
 // InterfaceDecl 接口声明
 type InterfaceDecl struct {
-	Token   lexer.Token
-	Public  bool
-	Name    string
-	Methods []*FuncSignature
+	Token      lexer.Token
+	Public     bool
+	Name       string
+	TypeParams *TypeParamList // 泛型类型参数（可选）
+	Methods    []*FuncSignature
 }
 
 func (i *InterfaceDecl) TokenLiteral() string { return i.Token.Literal }
@@ -182,10 +187,11 @@ type FuncSignature struct {
 
 // TypeDecl 类型声明
 type TypeDecl struct {
-	Token  lexer.Token
-	Public bool
-	Name   string
-	Type   Expression
+	Token      lexer.Token
+	Public     bool
+	Name       string
+	TypeParams *TypeParamList // 泛型类型参数（可选）
+	Type       Expression
 }
 
 func (t *TypeDecl) TokenLiteral() string { return t.Token.Literal }
@@ -842,3 +848,38 @@ type RawCode struct {
 func (r *RawCode) TokenLiteral() string { return r.Token.Literal }
 func (r *RawCode) statementNode()       {}
 func (r *RawCode) expressionNode()      {}
+
+// ========== 泛型相关 ==========
+
+// TypeParam 类型参数 (如 T any, K comparable)
+type TypeParam struct {
+	Name       string     // 类型参数名 (如 T, K)
+	Constraint Expression // 类型约束 (如 any, comparable, int|string)
+}
+
+// TypeParamList 类型参数列表 [T any, K comparable]
+type TypeParamList struct {
+	Token  lexer.Token
+	Params []*TypeParam
+}
+
+func (t *TypeParamList) TokenLiteral() string { return t.Token.Literal }
+
+// GenericType 泛型类型实例化 (如 List[int], Map[string, int])
+type GenericType struct {
+	Token    lexer.Token
+	Type     Expression   // 基础类型名 (如 List, Map)
+	TypeArgs []Expression // 类型参数 (如 int, string)
+}
+
+func (g *GenericType) TokenLiteral() string { return g.Token.Literal }
+func (g *GenericType) expressionNode()      {}
+
+// UnionType 联合类型约束 (如 int | string | float64)
+type UnionType struct {
+	Token lexer.Token
+	Types []Expression
+}
+
+func (u *UnionType) TokenLiteral() string { return u.Token.Literal }
+func (u *UnionType) expressionNode()      {}

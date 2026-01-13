@@ -412,6 +412,13 @@ func (g *CodeGen) generateFuncDecl(decl *parser.FuncDecl) {
 	name := symbol.ToGoName(decl.Name, decl.Public)
 	g.write(name)
 
+	// 泛型类型参数
+	if decl.TypeParams != nil && len(decl.TypeParams.Params) > 0 {
+		g.write("[")
+		g.generateTypeParams(decl.TypeParams)
+		g.write("]")
+	}
+
 	// 参数
 	g.write("(")
 	g.generateParams(decl.Params)
@@ -552,7 +559,24 @@ func (g *CodeGen) generateStructDecl(decl *parser.StructDecl) {
 	structName := symbol.ToGoName(decl.Name, decl.Public)
 
 	// 1. 生成结构体定义
-	g.writeLine(fmt.Sprintf("type %s struct {", structName))
+	var typeParams string
+	if decl.TypeParams != nil && len(decl.TypeParams.Params) > 0 {
+		var sb strings.Builder
+		sb.WriteString("[")
+		for i, param := range decl.TypeParams.Params {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(param.Name)
+			if param.Constraint != nil {
+				sb.WriteString(" ")
+				sb.WriteString(g.generateTypeConstraint(param.Constraint))
+			}
+		}
+		sb.WriteString("]")
+		typeParams = sb.String()
+	}
+	g.writeLine(fmt.Sprintf("type %s%s struct {", structName, typeParams))
 	g.indent++
 
 	// 嵌入字段
@@ -806,10 +830,10 @@ func (g *CodeGen) generateStaticClass(decl *parser.ClassDecl, className string) 
 // generateStaticClassMethod 生成静态类方法（包级函数）
 func (g *CodeGen) generateStaticClassMethod(decl *parser.ClassDecl, className string, method *parser.ClassMethod) {
 	isPublic := method.Visibility == "public"
-	
+
 	// 检查是否是重载方法
 	isOverloaded := g.transpiler.table.IsMethodOverloaded(g.transpiler.pkg, decl.Name, method.Name)
-	
+
 	// 命名规则: 公开方法 -> ClassName + MethodName, 私有方法 -> className + MethodName (首字母小写)
 	var funcName string
 	if isOverloaded {
@@ -828,7 +852,26 @@ func (g *CodeGen) generateStaticClassMethod(decl *parser.ClassDecl, className st
 		}
 	}
 
-	g.write(fmt.Sprintf("func %s(", funcName))
+	// 生成泛型类型参数字符串
+	var typeParams string
+	if method.TypeParams != nil && len(method.TypeParams.Params) > 0 {
+		var sb strings.Builder
+		sb.WriteString("[")
+		for i, param := range method.TypeParams.Params {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(param.Name)
+			if param.Constraint != nil {
+				sb.WriteString(" ")
+				sb.WriteString(g.generateTypeConstraint(param.Constraint))
+			}
+		}
+		sb.WriteString("]")
+		typeParams = sb.String()
+	}
+
+	g.write(fmt.Sprintf("func %s%s(", funcName, typeParams))
 	g.generateParams(method.Params)
 	g.write(")")
 
@@ -883,7 +926,24 @@ func (g *CodeGen) generateNormalClass(decl *parser.ClassDecl, className string) 
 	g.writeLine("")
 
 	// 2. 生成结构体
-	g.writeLine(fmt.Sprintf("type %s struct {", className))
+	var typeParams string
+	if decl.TypeParams != nil && len(decl.TypeParams.Params) > 0 {
+		var sb strings.Builder
+		sb.WriteString("[")
+		for i, param := range decl.TypeParams.Params {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(param.Name)
+			if param.Constraint != nil {
+				sb.WriteString(" ")
+				sb.WriteString(g.generateTypeConstraint(param.Constraint))
+			}
+		}
+		sb.WriteString("]")
+		typeParams = sb.String()
+	}
+	g.writeLine(fmt.Sprintf("type %s%s struct {", className, typeParams))
 	g.indent++
 	for _, field := range decl.Fields {
 		if !field.Static {
@@ -917,7 +977,7 @@ func (g *CodeGen) generateNormalClass(decl *parser.ClassDecl, className string) 
 	}
 
 	// 4.5 生成 Class() 方法
-	g.generateClassMethod_Class(className)
+	g.generateClassMethod_Class(decl, className)
 	g.writeLine("")
 
 	// 5. 入口类：生成 Go 的 func main()
@@ -958,9 +1018,10 @@ func (g *CodeGen) generateClassInfo(decl *parser.ClassDecl, className string) {
 }
 
 // generateClassMethod_Class 生成 Class() 方法
-func (g *CodeGen) generateClassMethod_Class(className string) {
+func (g *CodeGen) generateClassMethod_Class(decl *parser.ClassDecl, className string) {
 	infoVarName := fmt.Sprintf("_%s_classInfo", className)
-	g.writeLine(fmt.Sprintf("func (this *%s) Class() *lang.ClassInfo {", className))
+	typeParamsUse := g.getTypeParamsUse(decl.TypeParams)
+	g.writeLine(fmt.Sprintf("func (this *%s%s) Class() *lang.ClassInfo {", className, typeParamsUse))
 	g.indent++
 	g.writeLine(fmt.Sprintf("return %s", infoVarName))
 	g.indent--
@@ -1095,7 +1156,7 @@ func (g *CodeGen) generateChildClass(decl *parser.ClassDecl, className string) {
 	}
 
 	// 4.5 生成 Class() 方法
-	g.generateClassMethod_Class(className)
+	g.generateClassMethod_Class(decl, className)
 	g.writeLine("")
 }
 
@@ -1310,8 +1371,13 @@ func (g *CodeGen) generateClassConstructor(decl *parser.ClassDecl, className str
 // generateClassConstructorSimple 生成简单构造函数
 func (g *CodeGen) generateClassConstructorSimple(decl *parser.ClassDecl, className string) {
 	init := decl.InitMethod
+
+	// 获取泛型类型参数
+	typeParamsDef := g.getTypeParamsDef(decl.TypeParams)
+	typeParamsUse := g.getTypeParamsUse(decl.TypeParams)
+
 	g.writeIndent()
-	g.write(fmt.Sprintf("func New__%s(", className))
+	g.write(fmt.Sprintf("func New__%s%s(", className, typeParamsDef))
 
 	// 参数
 	for i, param := range init.Params {
@@ -1323,11 +1389,11 @@ func (g *CodeGen) generateClassConstructorSimple(decl *parser.ClassDecl, classNa
 		g.write(g.generateType(param.Type))
 	}
 
-	g.write(fmt.Sprintf(") *%s {\n", className))
+	g.write(fmt.Sprintf(") *%s%s {\n", className, typeParamsUse))
 	g.indent++
 
 	// 创建实例
-	g.writeLine(fmt.Sprintf("t := &%s{}", className))
+	g.writeLine(fmt.Sprintf("t := &%s%s{}", className, typeParamsUse))
 
 	// 设置字段默认值
 	for _, field := range decl.Fields {
@@ -1461,8 +1527,17 @@ func (g *CodeGen) generateDefaultConstructor(decl *parser.ClassDecl, className s
 
 // generateClassMethod 生成类方法
 func (g *CodeGen) generateClassMethod(decl *parser.ClassDecl, className string, method *parser.ClassMethod) {
+	// 静态方法生成为包级函数
+	if method.Static {
+		g.generateStaticClassMethod(decl, className, method)
+		return
+	}
+
 	isPublic := method.Visibility == "public" || method.Visibility == "protected"
 	methodName := symbol.ToGoName(method.Name, isPublic)
+
+	// 获取类型参数使用字符串（用于接收者类型）
+	typeParamsUse := g.getTypeParamsUse(decl.TypeParams)
 
 	// 检查是否有默认参数
 	hasDefault := false
@@ -1474,9 +1549,9 @@ func (g *CodeGen) generateClassMethod(decl *parser.ClassDecl, className string, 
 	}
 
 	if hasDefault {
-		g.generateClassMethodWithDefaults(className, methodName, method)
+		g.generateClassMethodWithDefaults(className+typeParamsUse, methodName, method)
 	} else {
-		g.generateClassMethodSimple(className, methodName, method)
+		g.generateClassMethodSimple(className+typeParamsUse, methodName, method)
 	}
 }
 
@@ -1716,7 +1791,26 @@ func (g *CodeGen) generateClassMethodWithDefaults(className, methodName string, 
 // generateInterfaceDecl 生成接口声明
 func (g *CodeGen) generateInterfaceDecl(decl *parser.InterfaceDecl) {
 	name := symbol.ToGoName(decl.Name, decl.Public)
-	g.writeLine(fmt.Sprintf("type %s interface {", name))
+
+	var typeParams string
+	if decl.TypeParams != nil && len(decl.TypeParams.Params) > 0 {
+		var sb strings.Builder
+		sb.WriteString("[")
+		for i, param := range decl.TypeParams.Params {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(param.Name)
+			if param.Constraint != nil {
+				sb.WriteString(" ")
+				sb.WriteString(g.generateTypeConstraint(param.Constraint))
+			}
+		}
+		sb.WriteString("]")
+		typeParams = sb.String()
+	}
+
+	g.writeLine(fmt.Sprintf("type %s%s interface {", name, typeParams))
 	g.indent++
 	for _, method := range decl.Methods {
 		methodName := symbol.ToGoName(method.Name, true) // 接口方法默认导出
@@ -1743,7 +1837,26 @@ func (g *CodeGen) generateInterfaceDecl(decl *parser.InterfaceDecl) {
 func (g *CodeGen) generateTypeDecl(decl *parser.TypeDecl) {
 	name := symbol.ToGoName(decl.Name, decl.Public)
 	typeName := g.generateType(decl.Type)
-	g.writeLine(fmt.Sprintf("type %s %s", name, typeName))
+
+	var typeParams string
+	if decl.TypeParams != nil && len(decl.TypeParams.Params) > 0 {
+		var sb strings.Builder
+		sb.WriteString("[")
+		for i, param := range decl.TypeParams.Params {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(param.Name)
+			if param.Constraint != nil {
+				sb.WriteString(" ")
+				sb.WriteString(g.generateTypeConstraint(param.Constraint))
+			}
+		}
+		sb.WriteString("]")
+		typeParams = sb.String()
+	}
+
+	g.writeLine(fmt.Sprintf("type %s%s %s", name, typeParams, typeName))
 }
 
 // generateVarDecl 生成变量声明
@@ -2931,6 +3044,14 @@ func (g *CodeGen) generateExpression(expr parser.Expression) string {
 		return g.generateStructType(e)
 	case *parser.Ellipsis:
 		return "..." + g.generateType(e.Elt)
+	case *parser.GenericType:
+		return g.generateGenericType(e)
+	case *parser.UnionType:
+		var parts []string
+		for _, t := range e.Types {
+			parts = append(parts, g.generateType(t))
+		}
+		return strings.Join(parts, " | ")
 	default:
 		return ""
 	}
@@ -3716,11 +3837,28 @@ func (g *CodeGen) generateStructType(t *parser.StructType) string {
 // 1. Go 风格: new(Type) -> new(Type)
 // 2. OOP 风格: new ClassName() -> NewClassName(NewDefaultClassNameInitOpts())
 //             new ClassName(name: "test") -> NewClassName(ClassNameInitOpts{Name: "test"})
+// 3. 泛型: new ClassName[T]() -> New__ClassName[T]()
 func (g *CodeGen) generateNewExpr(expr *parser.NewExpr) string {
-	// 获取类名
+	// 获取类名和类型参数
 	className := ""
+	typeArgs := "" // 泛型类型参数 [T, K, ...]
+
 	if ident, ok := expr.Type.(*parser.Identifier); ok {
 		className = ident.Value
+	} else if gt, ok := expr.Type.(*parser.GenericType); ok {
+		// 泛型类型: Box[string]
+		if ident, ok := gt.Type.(*parser.Identifier); ok {
+			className = ident.Value
+		} else {
+			// 复杂类型，使用 Go 风格
+			return "new(" + g.generateType(expr.Type) + ")"
+		}
+		// 生成类型参数
+		var typeArgStrs []string
+		for _, arg := range gt.TypeArgs {
+			typeArgStrs = append(typeArgStrs, g.generateType(arg))
+		}
+		typeArgs = "[" + strings.Join(typeArgStrs, ", ") + "]"
 	} else {
 		// Go 风格的 new(Type)
 		return "new(" + g.generateType(expr.Type) + ")"
@@ -3752,22 +3890,22 @@ func (g *CodeGen) generateNewExpr(expr *parser.NewExpr) string {
 
 	// 生成构造函数调用
 	if len(expr.Arguments) == 0 {
-		if hasInitParams {
-			// 有 init 参数: New__ClassName(NewDefault__ClassName__InitOpts())
+		if hasInitParams && typeArgs == "" {
+			// 有 init 参数且非泛型: New__ClassName(NewDefault__ClassName__InitOpts())
 			return fmt.Sprintf("%sNew__%s(%sNewDefault__%s__InitOpts())", pkgPrefix, goClassName, pkgPrefix, goClassName)
 		}
-		// 无 init 参数: New__ClassName()
-		return fmt.Sprintf("%sNew__%s()", pkgPrefix, goClassName)
+		// 无 init 参数或泛型: New__ClassName() 或 New__ClassName[T]()
+		return fmt.Sprintf("%sNew__%s%s()", pkgPrefix, goClassName, typeArgs)
 	}
 
-	// 有参数: 生成 opts 结构体
+	// 有参数: 生成直接调用
 	var argStrs []string
 	for _, arg := range expr.Arguments {
 		argStrs = append(argStrs, g.generateExpression(arg))
 	}
 
-	// 生成: New__ClassName(ClassName__InitOpts{args...})
-	return fmt.Sprintf("%sNew__%s(%s%s__InitOpts{%s})", pkgPrefix, goClassName, pkgPrefix, goClassName, strings.Join(argStrs, ", "))
+	// 泛型类型或普通类型的构造函数调用
+	return fmt.Sprintf("%sNew__%s%s(%s)", pkgPrefix, goClassName, typeArgs, strings.Join(argStrs, ", "))
 }
 
 // generateType 生成类型
@@ -3979,4 +4117,93 @@ func (g *CodeGen) writeIndent() {
 	for i := 0; i < g.indent; i++ {
 		g.builder.WriteString("\t")
 	}
+}
+
+// generateTypeParams 生成泛型类型参数列表 [T any, K comparable]
+func (g *CodeGen) generateTypeParams(params *parser.TypeParamList) {
+	if params == nil || len(params.Params) == 0 {
+		return
+	}
+
+	for i, param := range params.Params {
+		if i > 0 {
+			g.write(", ")
+		}
+		g.write(param.Name)
+		if param.Constraint != nil {
+			g.write(" ")
+			g.write(g.generateTypeConstraint(param.Constraint))
+		}
+	}
+}
+
+// getTypeParamsDef 获取泛型类型参数定义字符串 [T any, K comparable]
+func (g *CodeGen) getTypeParamsDef(params *parser.TypeParamList) string {
+	if params == nil || len(params.Params) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("[")
+	for i, param := range params.Params {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(param.Name)
+		if param.Constraint != nil {
+			sb.WriteString(" ")
+			sb.WriteString(g.generateTypeConstraint(param.Constraint))
+		}
+	}
+	sb.WriteString("]")
+	return sb.String()
+}
+
+// getTypeParamsUse 获取泛型类型参数使用字符串 [T, K]（不带约束）
+func (g *CodeGen) getTypeParamsUse(params *parser.TypeParamList) string {
+	if params == nil || len(params.Params) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("[")
+	for i, param := range params.Params {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(param.Name)
+	}
+	sb.WriteString("]")
+	return sb.String()
+}
+
+// generateTypeConstraint 生成类型约束
+func (g *CodeGen) generateTypeConstraint(expr parser.Expression) string {
+	switch e := expr.(type) {
+	case *parser.Identifier:
+		return e.Value
+	case *parser.UnionType:
+		var parts []string
+		for _, t := range e.Types {
+			parts = append(parts, g.generateType(t))
+		}
+		return strings.Join(parts, " | ")
+	default:
+		return g.generateType(expr)
+	}
+}
+
+// generateGenericType 生成泛型类型实例化 List[int]
+func (g *CodeGen) generateGenericType(gt *parser.GenericType) string {
+	var result strings.Builder
+	result.WriteString(g.generateType(gt.Type))
+	result.WriteString("[")
+	for i, arg := range gt.TypeArgs {
+		if i > 0 {
+			result.WriteString(", ")
+		}
+		result.WriteString(g.generateType(arg))
+	}
+	result.WriteString("]")
+	return result.String()
 }
