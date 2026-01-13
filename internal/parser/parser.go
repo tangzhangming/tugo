@@ -846,7 +846,11 @@ func (p *Parser) parseClassDeclFull(public bool, abstract bool, static bool) *Cl
 				decl.Fields = append(decl.Fields, m)
 			case *ClassMethod:
 				if m.Name == "init" {
-					decl.InitMethod = m
+					decl.InitMethods = append(decl.InitMethods, m)
+					// 兼容旧代码：InitMethod 取第一个
+					if decl.InitMethod == nil {
+						decl.InitMethod = m
+					}
 				} else if m.Abstract {
 					decl.AbstractMethods = append(decl.AbstractMethods, m)
 				} else {
@@ -1464,7 +1468,8 @@ func (p *Parser) parseSelectStmt() *SelectStmt {
 		if clause != nil {
 			stmt.Cases = append(stmt.Cases, clause)
 		}
-		p.nextToken()
+		// 注意：parseCommClause 结束时 curToken 已经是下一个 case/default/rbrace
+		// 不需要额外调用 nextToken
 	}
 
 	return stmt

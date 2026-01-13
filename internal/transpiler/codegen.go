@@ -32,6 +32,7 @@ type CodeGen struct {
 	ternaryCounter     int                  // 三元表达式计数器（用于生成唯一临时变量名）
 	matchCounter       int                  // match 表达式计数器（用于生成唯一临时变量名）
 	pendingStatements  []string             // 需要在当前语句前插入的代码
+	currentFuncParams  map[string]bool      // 当前函数的参数名（用于标识符解析）
 }
 
 // NewCodeGen 创建一个新的代码生成器
@@ -957,14 +958,21 @@ func (g *CodeGen) generateNormalClass(decl *parser.ClassDecl, className string) 
 	g.writeLine("}")
 	g.writeLine("")
 
-	// 3. 生成构造函数
-	if decl.InitMethod != nil {
+	// 3. 生成构造函数（支持多个重载）
+	if len(decl.InitMethods) > 0 {
+		for _, initMethod := range decl.InitMethods {
+			g.generateClassConstructorForInit(decl, className, initMethod)
+			g.writeLine("")
+		}
+	} else if decl.InitMethod != nil {
+		// 兼容旧代码
 		g.generateClassConstructor(decl, className)
+		g.writeLine("")
 	} else {
 		// 生成默认构造函数
 		g.generateDefaultConstructor(decl, className)
+		g.writeLine("")
 	}
-	g.writeLine("")
 
 	// 4. 生成方法
 	for _, method := range decl.Methods {
@@ -1348,10 +1356,8 @@ func (g *CodeGen) generateChildClassDefaultConstructor(decl *parser.ClassDecl, c
 	g.writeLine("}")
 }
 
-// generateClassConstructor 生成类构造函数
-func (g *CodeGen) generateClassConstructor(decl *parser.ClassDecl, className string) {
-	init := decl.InitMethod
-
+// generateClassConstructorForInit 为指定的 init 方法生成构造函数
+func (g *CodeGen) generateClassConstructorForInit(decl *parser.ClassDecl, className string, init *parser.ClassMethod) {
 	// 检查是否有默认参数
 	hasDefault := false
 	for _, param := range init.Params {
@@ -1362,22 +1368,37 @@ func (g *CodeGen) generateClassConstructor(decl *parser.ClassDecl, className str
 	}
 
 	if hasDefault {
-		g.generateClassConstructorWithDefaults(decl, className)
+		g.generateClassConstructorWithDefaultsForInit(decl, className, init)
 	} else {
-		g.generateClassConstructorSimple(decl, className)
+		g.generateClassConstructorSimpleForInit(decl, className, init)
 	}
 }
 
-// generateClassConstructorSimple 生成简单构造函数
-func (g *CodeGen) generateClassConstructorSimple(decl *parser.ClassDecl, className string) {
-	init := decl.InitMethod
+// generateClassConstructor 生成类构造函数（兼容旧代码）
+func (g *CodeGen) generateClassConstructor(decl *parser.ClassDecl, className string) {
+	g.generateClassConstructorForInit(decl, className, decl.InitMethod)
+}
 
+// generateClassConstructorSimple 生成简单构造函数（兼容旧代码）
+func (g *CodeGen) generateClassConstructorSimple(decl *parser.ClassDecl, className string) {
+	g.generateClassConstructorSimpleForInit(decl, className, decl.InitMethod)
+}
+
+// generateClassConstructorSimpleForInit 为指定的 init 方法生成简单构造函数
+func (g *CodeGen) generateClassConstructorSimpleForInit(decl *parser.ClassDecl, className string, init *parser.ClassMethod) {
 	// 获取泛型类型参数
 	typeParamsDef := g.getTypeParamsDef(decl.TypeParams)
 	typeParamsUse := g.getTypeParamsUse(decl.TypeParams)
 
+	// 生成构造函数名（支持重载）
+	constructorName := "New__" + className
+	if len(init.Params) > 0 {
+		// 有参数时使用修饰名避免重复定义
+		constructorName = symbol.GenerateMangledName("New__"+className, init.Params, true)
+	}
+
 	g.writeIndent()
-	g.write(fmt.Sprintf("func New__%s%s(", className, typeParamsDef))
+	g.write(fmt.Sprintf("func %s%s(", constructorName, typeParamsDef))
 
 	// 参数
 	for i, param := range init.Params {
@@ -1407,10 +1428,16 @@ func (g *CodeGen) generateClassConstructorSimple(decl *parser.ClassDecl, classNa
 	// 执行 init 方法体（替换 this 为 t）
 	if init.Body != nil {
 		g.currentReceiver = "t"
+		// 设置当前函数参数名
+		g.currentFuncParams = make(map[string]bool)
+		for _, param := range init.Params {
+			g.currentFuncParams[param.Name] = true
+		}
 		for _, stmt := range init.Body.Statements {
 			g.generateStatement(stmt)
 		}
 		g.currentReceiver = ""
+		g.currentFuncParams = nil
 	}
 
 	g.writeLine("return t")
@@ -1418,9 +1445,13 @@ func (g *CodeGen) generateClassConstructorSimple(decl *parser.ClassDecl, classNa
 	g.writeLine("}")
 }
 
-// generateClassConstructorWithDefaults 生成带默认参数的构造函数
+// generateClassConstructorWithDefaults 生成带默认参数的构造函数（兼容旧代码）
 func (g *CodeGen) generateClassConstructorWithDefaults(decl *parser.ClassDecl, className string) {
-	init := decl.InitMethod
+	g.generateClassConstructorWithDefaultsForInit(decl, className, decl.InitMethod)
+}
+
+// generateClassConstructorWithDefaultsForInit 为指定的 init 方法生成带默认参数的构造函数
+func (g *CodeGen) generateClassConstructorWithDefaultsForInit(decl *parser.ClassDecl, className string, init *parser.ClassMethod) {
 	optsName := fmt.Sprintf("%s__InitOpts", className)
 
 	// 生成 Opts 结构体
@@ -1477,10 +1508,16 @@ func (g *CodeGen) generateClassConstructorWithDefaults(decl *parser.ClassDecl, c
 	// 执行 init 方法体
 	if init.Body != nil {
 		g.currentReceiver = "t"
+		// 设置当前函数参数名
+		g.currentFuncParams = make(map[string]bool)
+		for _, param := range init.Params {
+			g.currentFuncParams[param.Name] = true
+		}
 		for _, stmt := range init.Body.Statements {
 			g.generateStatement(stmt)
 		}
 		g.currentReceiver = ""
+		g.currentFuncParams = nil
 	}
 
 	g.writeLine("return t")
@@ -1661,12 +1698,18 @@ func (g *CodeGen) generateClassMethodSimple(className, methodName string, method
 		g.currentReceiver = receiverName
 		g.currentFuncErrable = method.Errable
 		g.currentFuncResults = method.Results
+		// 设置当前函数参数名
+		g.currentFuncParams = make(map[string]bool)
+		for _, param := range method.Params {
+			g.currentFuncParams[param.Name] = true
+		}
 		for _, stmt := range method.Body.Statements {
 			g.generateStatement(stmt)
 		}
 		g.currentReceiver = ""
 		g.currentFuncErrable = false
 		g.currentFuncResults = nil
+		g.currentFuncParams = nil
 	}
 
 	g.indent--
@@ -1776,12 +1819,18 @@ func (g *CodeGen) generateClassMethodWithDefaults(className, methodName string, 
 		g.currentReceiver = receiverName
 		g.currentFuncErrable = method.Errable
 		g.currentFuncResults = method.Results
+		// 设置当前函数参数名
+		g.currentFuncParams = make(map[string]bool)
+		for _, param := range method.Params {
+			g.currentFuncParams[param.Name] = true
+		}
 		for _, stmt := range method.Body.Statements {
 			g.generateStatement(stmt)
 		}
 		g.currentReceiver = ""
 		g.currentFuncErrable = false
 		g.currentFuncResults = nil
+		g.currentFuncParams = nil
 	}
 
 	g.indent--
@@ -2833,6 +2882,7 @@ func (g *CodeGen) generateCommClause(clause *parser.CommClause) {
 	if clause.Comm == nil {
 		g.writeLine("default:")
 	} else {
+		g.writeIndent()
 		g.write("case ")
 		switch s := clause.Comm.(type) {
 		case *parser.ExpressionStmt:
@@ -2862,7 +2912,7 @@ func (g *CodeGen) generateCommClause(clause *parser.CommClause) {
 			g.write(" = ")
 			g.write(strings.Join(right, ", "))
 		}
-		g.writeLine(":")
+		g.builder.WriteString(":\n")
 	}
 
 	g.indent++
@@ -3066,6 +3116,11 @@ func (g *CodeGen) generateIdentifier(ident *parser.Identifier) string {
 		return symbol.TransformDollarVar(name)
 	}
 
+	// 优先检查是否是当前函数的参数名（参数名不应被转换）
+	if g.currentFuncParams != nil && g.currentFuncParams[name] {
+		return name
+	}
+
 	// 检查是否是导入的类型名
 	if pkgName, ok := g.typeToPackage[name]; ok {
 		return pkgName + "." + name
@@ -3251,6 +3306,13 @@ func (g *CodeGen) generateCallExpr(expr *parser.CallExpr) string {
 				argStrs = append(argStrs, g.generateExpression(arg))
 			}
 			return "fmt.Errorf(" + strings.Join(argStrs, ", ") + ")"
+		// Go 内置函数，保持小写
+		case "make", "new", "len", "cap", "append", "copy", "delete", "close", "panic", "recover", "complex", "real", "imag":
+			var argStrs []string
+			for _, arg := range expr.Arguments {
+				argStrs = append(argStrs, g.generateExpression(arg))
+			}
+			return ident.Value + "(" + strings.Join(argStrs, ", ") + ")"
 		}
 
 		// 检查是否是带默认参数的函数
@@ -3508,7 +3570,15 @@ func (g *CodeGen) generateSelectorExpr(expr *parser.SelectorExpr) string {
 		return x + "." + sym.GoName
 	}
 
-	return x + "." + expr.Sel
+	// 对于未知的方法调用（可能是外部包的方法），首字母大写
+	// 这是因为 Go 的导出规则要求公开方法首字母大写
+	// 在 tugo 中用户使用小驼峰，需要转换
+	selName := expr.Sel
+	if len(selName) > 0 && selName[0] >= 'a' && selName[0] <= 'z' {
+		// 首字母小写，可能是未导出的方法调用，转换为大驼峰
+		selName = symbol.ToGoName(selName, true)
+	}
+	return x + "." + selName
 }
 
 // generateStaticAccessExpr 生成静态访问表达式 (ClassName::member 或 self::member)
@@ -3867,45 +3937,114 @@ func (g *CodeGen) generateNewExpr(expr *parser.NewExpr) string {
 	// OOP 风格的 new ClassName(args)
 	// 检查是否是导入的类型
 	pkgPrefix := ""
+	classPkg := g.transpiler.pkg // 默认当前包
 	if pkg, ok := g.typeToPackage[className]; ok {
 		pkgPrefix = pkg + "."
+		classPkg = pkg // 使用导入的包名
 	}
 
 	// 查找类声明以确定是否公开和是否有 init 参数
-	classDecl := g.transpiler.GetClassDecl(g.transpiler.pkg, className)
+	classDecl := g.transpiler.GetClassDecl(classPkg, className)
 	isClassPublic := true
-	hasInitParams := false  // 是否有 init 参数（需要 opts 模式）
 	if classDecl != nil {
 		isClassPublic = classDecl.Public
-		// 检查是否有 init 方法且有参数
-		if classDecl.InitMethod != nil && len(classDecl.InitMethod.Params) > 0 {
-			hasInitParams = true
-		}
-	} else {
-		// 外部包的类，无法获取类声明，保持原有行为（使用 opts 模式）
-		// 这是更安全的默认行为，因为大多数类都有构造参数
-		hasInitParams = true
 	}
 	goClassName := symbol.ToGoName(className, isClassPublic)
 
-	// 生成构造函数调用
-	if len(expr.Arguments) == 0 {
-		if hasInitParams && typeArgs == "" {
-			// 有 init 参数且非泛型: New__ClassName(NewDefault__ClassName__InitOpts())
-			return fmt.Sprintf("%sNew__%s(%sNewDefault__%s__InitOpts())", pkgPrefix, goClassName, pkgPrefix, goClassName)
-		}
-		// 无 init 参数或泛型: New__ClassName() 或 New__ClassName[T]()
-		return fmt.Sprintf("%sNew__%s%s()", pkgPrefix, goClassName, typeArgs)
-	}
-
-	// 有参数: 生成直接调用
+	// 生成参数表达式
 	var argStrs []string
 	for _, arg := range expr.Arguments {
 		argStrs = append(argStrs, g.generateExpression(arg))
 	}
 
-	// 泛型类型或普通类型的构造函数调用
+	// 查找匹配的构造函数
+	if classDecl != nil && len(classDecl.InitMethods) > 1 {
+		// 有多个 init 方法（真正的重载），需要选择匹配的
+		matchedInit := g.findMatchingInit(classDecl.InitMethods, expr.Arguments)
+		if matchedInit != nil {
+			// 检查是否有默认参数
+			hasDefault := false
+			for _, param := range matchedInit.Params {
+				if param.DefaultValue != nil {
+					hasDefault = true
+					break
+				}
+			}
+			// 有默认参数的使用 opts 模式
+			if hasDefault && len(argStrs) == 0 {
+				return fmt.Sprintf("%sNew__%s(%sNewDefault__%s__InitOpts())", pkgPrefix, goClassName, pkgPrefix, goClassName)
+			}
+			// 生成修饰后的构造函数名
+			constructorName := "New__" + goClassName
+			if len(matchedInit.Params) > 0 {
+				constructorName = symbol.GenerateMangledName("New__"+goClassName, matchedInit.Params, true)
+			}
+			if len(argStrs) == 0 {
+				return fmt.Sprintf("%s%s%s()", pkgPrefix, constructorName, typeArgs)
+			}
+			return fmt.Sprintf("%s%s%s(%s)", pkgPrefix, constructorName, typeArgs, strings.Join(argStrs, ", "))
+		}
+	}
+
+	// 外部包的类：如果有参数，尝试生成修饰后的构造函数名
+	if classDecl == nil && len(expr.Arguments) > 0 {
+		// 根据参数类型推断修饰名
+		mangledSuffix := g.inferMangledSuffix(expr.Arguments)
+		if mangledSuffix != "" {
+			return fmt.Sprintf("%sNew__%s%s%s(%s)", pkgPrefix, goClassName, mangledSuffix, typeArgs, strings.Join(argStrs, ", "))
+		}
+	}
+
+	// 默认行为：单个 init 或无 init
+	if len(expr.Arguments) == 0 {
+		// 无参数调用
+		// 检查是否需要使用 opts 模式
+		needOpts := false
+		if classDecl != nil && classDecl.InitMethod != nil && len(classDecl.InitMethod.Params) > 0 {
+			// 已知类有带参数的 init: 使用 opts 模式
+			needOpts = true
+		} else if classDecl == nil && typeArgs == "" {
+			// 外部包的类（非泛型），默认使用 opts 模式
+			needOpts = true
+		}
+		if needOpts && typeArgs == "" {
+			return fmt.Sprintf("%sNew__%s(%sNewDefault__%s__InitOpts())", pkgPrefix, goClassName, pkgPrefix, goClassName)
+		}
+		return fmt.Sprintf("%sNew__%s%s()", pkgPrefix, goClassName, typeArgs)
+	}
+
+	// 有参数: 生成直接调用
 	return fmt.Sprintf("%sNew__%s%s(%s)", pkgPrefix, goClassName, typeArgs, strings.Join(argStrs, ", "))
+}
+
+// findMatchingInit 根据参数找到匹配的 init 方法
+func (g *CodeGen) findMatchingInit(initMethods []*parser.ClassMethod, args []parser.Expression) *parser.ClassMethod {
+	for _, init := range initMethods {
+		if len(init.Params) == len(args) {
+			return init
+		}
+	}
+	// 没有精确匹配，返回第一个（或 nil）
+	if len(initMethods) > 0 {
+		return initMethods[0]
+	}
+	return nil
+}
+
+// inferMangledSuffix 根据参数推断修饰后缀
+func (g *CodeGen) inferMangledSuffix(args []parser.Expression) string {
+	if len(args) == 0 {
+		return ""
+	}
+	var types []string
+	for _, arg := range args {
+		t := g.inferExprType(arg)
+		if t == "any" {
+			return "" // 无法推断，不使用修饰名
+		}
+		types = append(types, t)
+	}
+	return "_" + strings.Join(types, "_")
 }
 
 // generateType 生成类型

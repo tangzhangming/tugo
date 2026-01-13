@@ -1,0 +1,68 @@
+package concurrent
+
+// Channel 通道封装类
+// 对 Go 的 channel 进行面向对象封装，支持阻塞/非阻塞操作
+public class Channel[T any] {
+    var ch chan T
+
+    // init 创建无缓冲通道
+    public func init() {
+        this.ch = make(chan T)
+    }
+
+    // init 创建带缓冲通道
+    public func init(capacity: int) {
+        this.ch = make(chan T, capacity)
+    }
+
+    // send 阻塞发送数据到通道
+    public func send(data: T) {
+        this.ch <- data
+    }
+
+    // receive 阻塞接收通道数据
+    public func receive() T {
+        return <-this.ch
+    }
+
+    // trySend 非阻塞发送
+    public func trySend(data: T) bool {
+        select {
+        case this.ch <- data:
+            return true
+        default:
+            return false
+        }
+    }
+
+    // tryReceive 非阻塞接收
+    public func tryReceive() (T, bool) {
+        select {
+        case data := <-this.ch:
+            return data, true
+        default:
+            var zero T
+            return zero, false
+        }
+    }
+
+    // close 关闭通道
+    public func close() {
+        close(this.ch)
+    }
+
+    // length 返回当前缓冲区中的元素数量
+    public func length() int {
+        return len(this.ch)
+    }
+
+    // capacity 返回缓冲区容量
+    public func capacity() int {
+        return cap(this.ch)
+    }
+
+    // raw 获取底层的 Go channel
+    public func raw() chan T {
+        return this.ch
+    }
+}

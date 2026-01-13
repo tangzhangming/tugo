@@ -1119,6 +1119,10 @@ func (t *Transpiler) collectUsedTypesInBlockStmt(stmt parser.Statement, usedType
 		t.collectUsedTypesInExpr(s.Expression, usedTypes)
 	case *parser.ShortVarDecl:
 		t.collectUsedTypesInExpr(s.Value, usedTypes)
+	case *parser.VarDecl:
+		if s.Value != nil {
+			t.collectUsedTypesInExpr(s.Value, usedTypes)
+		}
 	case *parser.AssignStmt:
 		for _, expr := range s.Left {
 			t.collectUsedTypesInExpr(expr, usedTypes)
@@ -1170,9 +1174,7 @@ func (t *Transpiler) collectUsedTypesInExpr(expr parser.Expression, usedTypes ma
 	case *parser.CallExpr:
 		// 检查构造函数调用 new Type()
 		if newExpr, ok := e.Function.(*parser.NewExpr); ok {
-			if ident, ok := newExpr.Type.(*parser.Identifier); ok {
-				usedTypes[ident.Value] = true
-			}
+			t.collectTypeNameFromExpr(newExpr.Type, usedTypes)
 		} else {
 			t.collectUsedTypesInExpr(e.Function, usedTypes)
 		}
@@ -1182,9 +1184,7 @@ func (t *Transpiler) collectUsedTypesInExpr(expr parser.Expression, usedTypes ma
 		}
 	case *parser.NewExpr:
 		// new 表达式
-		if ident, ok := e.Type.(*parser.Identifier); ok {
-			usedTypes[ident.Value] = true
-		}
+		t.collectTypeNameFromExpr(e.Type, usedTypes)
 	case *parser.StaticAccessExpr:
 		// 静态方法调用 Type::method
 		if ident, ok := e.Left.(*parser.Identifier); ok {
@@ -1200,6 +1200,23 @@ func (t *Transpiler) collectUsedTypesInExpr(expr parser.Expression, usedTypes ma
 		t.collectUsedTypesInExpr(e.Index, usedTypes)
 	case *parser.SelectorExpr:
 		t.collectUsedTypesInExpr(e.X, usedTypes)
+	}
+}
+
+// collectTypeNameFromExpr 从类型表达式中提取类型名（支持泛型类型）
+func (t *Transpiler) collectTypeNameFromExpr(typeExpr parser.Expression, usedTypes map[string]bool) {
+	if typeExpr == nil {
+		return
+	}
+	
+	switch te := typeExpr.(type) {
+	case *parser.Identifier:
+		usedTypes[te.Value] = true
+	case *parser.GenericType:
+		// 泛型类型：从基础类型中提取类型名
+		if ident, ok := te.Type.(*parser.Identifier); ok {
+			usedTypes[ident.Value] = true
+		}
 	}
 }
 

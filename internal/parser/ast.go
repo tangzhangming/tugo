@@ -110,7 +110,8 @@ type ClassDecl struct {
 	Fields          []*ClassField  // 字段列表
 	Methods         []*ClassMethod // 方法列表
 	AbstractMethods []*ClassMethod // 抽象方法列表
-	InitMethod      *ClassMethod   // 构造方法
+	InitMethod      *ClassMethod   // 构造方法（兼容旧代码，取 InitMethods[0]）
+	InitMethods     []*ClassMethod // 多个构造方法（重载）
 }
 
 func (c *ClassDecl) TokenLiteral() string { return c.Token.Literal }
