@@ -589,8 +589,13 @@ func (g *CodeGen) generateStructDecl(decl *parser.StructDecl) {
 	for _, field := range decl.Fields {
 		fieldName := symbol.ToGoName(field.Name, field.Public)
 		typeName := g.generateType(field.Type)
-		if field.Tag != "" {
-			g.writeLine(fmt.Sprintf("%s %s %s", fieldName, typeName, field.Tag))
+		// 优先使用新的 Tags 字段，兼容旧的 Tag 字段
+		tagStr := g.generateFieldTags(field.Tags)
+		if tagStr == "" && field.Tag != "" {
+			tagStr = field.Tag
+		}
+		if tagStr != "" {
+			g.writeLine(fmt.Sprintf("%s %s %s", fieldName, typeName, tagStr))
 		} else {
 			g.writeLine(fmt.Sprintf("%s %s", fieldName, typeName))
 		}
@@ -610,6 +615,20 @@ func (g *CodeGen) generateStructDecl(decl *parser.StructDecl) {
 		g.generateStructMethod(decl, structName, method)
 		g.writeLine("")
 	}
+}
+
+// generateFieldTags 将字段标签数组转换为 Go struct tag 字符串
+// 输入: []*parser.FieldTag{{Key: "json", Value: "user_name"}, {Key: "validate", Value: "min=18"}}
+// 输出: `json:"user_name" validate:"min=18"`
+func (g *CodeGen) generateFieldTags(tags []*parser.FieldTag) string {
+	if len(tags) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, tag := range tags {
+		parts = append(parts, fmt.Sprintf(`%s:"%s"`, tag.Key, tag.Value))
+	}
+	return "`" + strings.Join(parts, " ") + "`"
 }
 
 // generateStructConstructor 生成结构体构造函数
@@ -951,7 +970,12 @@ func (g *CodeGen) generateNormalClass(decl *parser.ClassDecl, className string) 
 			isPublic := field.Visibility == "public" || field.Visibility == "protected"
 			fieldName := symbol.ToGoName(field.Name, isPublic)
 			typeName := g.generateType(field.Type)
-			g.writeLine(fmt.Sprintf("%s %s", fieldName, typeName))
+			tagStr := g.generateFieldTags(field.Tags)
+			if tagStr != "" {
+				g.writeLine(fmt.Sprintf("%s %s %s", fieldName, typeName, tagStr))
+			} else {
+				g.writeLine(fmt.Sprintf("%s %s", fieldName, typeName))
+			}
 		}
 	}
 	g.indent--

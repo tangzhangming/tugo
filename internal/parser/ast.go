@@ -88,13 +88,20 @@ type StructDecl struct {
 func (s *StructDecl) TokenLiteral() string { return s.Token.Literal }
 func (s *StructDecl) statementNode()       {}
 
+// FieldTag 字段标签
+type FieldTag struct {
+	Key   string // 标签键 (如 "json", "validate")
+	Value string // 标签值 (如 "user_name", "min=18,max=100")
+}
+
 // StructField 结构体字段
 type StructField struct {
-	Name       string     // 字段名
-	Type       Expression // 类型
-	Tag        string     // 标签
-	Public     bool       // 是否公开
-	Visibility string     // public/private（可选，默认 private）
+	Name       string      // 字段名
+	Type       Expression  // 类型
+	Tag        string      // 标签（旧版，保留兼容）
+	Tags       []*FieldTag // 标签列表（新版）
+	Public     bool        // 是否公开
+	Visibility string      // public/private（可选，默认 private）
 }
 
 // ClassDecl 类声明
@@ -124,6 +131,7 @@ type ClassField struct {
 	Value      Expression  // 默认值（可选）
 	Visibility string      // public/private/protected
 	Static     bool        // 是否静态
+	Tags       []*FieldTag // 标签列表
 }
 
 // ClassMethod 类方法

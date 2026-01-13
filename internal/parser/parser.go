@@ -1,6 +1,8 @@
 package parser
 
 import (
+	"fmt"
+
 	"github.com/tangzhangming/tugo/internal/i18n"
 	"github.com/tangzhangming/tugo/internal/lexer"
 )
@@ -34,6 +36,10 @@ func (p *Parser) nextToken() {
 	// 跳过注释
 	for p.peekToken.Type == lexer.TOKEN_COMMENT {
 		p.peekToken = p.l.NextToken()
+	}
+	// 检查非法 token（排除初始化时的空 token）
+	if p.curToken.Type == lexer.TOKEN_ILLEGAL && p.curToken.Literal != "" {
+		p.addError(fmt.Sprintf("illegal character '%s'", p.curToken.Literal))
 	}
 }
 
@@ -276,6 +282,54 @@ func lastIndex(s string, c byte) int {
 	return -1
 }
 
+// collectFieldTags 收集字段标签
+// 返回收集到的标签列表
+func (p *Parser) collectFieldTags() []*FieldTag {
+	var tags []*FieldTag
+	for p.curTokenIs(lexer.TOKEN_TAG) {
+		tag := p.parseFieldTag(p.curToken.Literal)
+		if tag != nil {
+			tags = append(tags, tag)
+		}
+		p.nextToken()
+	}
+	return tags
+}
+
+// parseFieldTag 解析单个字段标签
+// 输入格式: "#key:value" 或 "#key:\"value\""
+func (p *Parser) parseFieldTag(literal string) *FieldTag {
+	if len(literal) < 2 || literal[0] != '#' {
+		return nil
+	}
+
+	// 去掉 # 前缀
+	content := literal[1:]
+
+	// 查找 : 分隔符
+	colonIdx := -1
+	for i := 0; i < len(content); i++ {
+		if content[i] == ':' {
+			colonIdx = i
+			break
+		}
+	}
+
+	if colonIdx == -1 {
+		// 没有值，只有 key
+		return &FieldTag{Key: content, Value: ""}
+	}
+
+	key := content[:colonIdx]
+	value := content[colonIdx+1:]
+
+	// 去掉值两端的双引号（如果有）
+	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+		value = value[1 : len(value)-1]
+	}
+
+	return &FieldTag{Key: key, Value: value}
+}
 
 // parseStatement 解析语句
 func (p *Parser) parseStatement() Statement {
@@ -597,6 +651,18 @@ func (p *Parser) parseStructDecl(public bool) *StructDecl {
 
 // parseStructMember 解析结构体成员（字段、方法、嵌入）
 func (p *Parser) parseStructMember() interface{} {
+	// 检查非法 token，跳过直到找到有效的成员开始
+	for p.curTokenIs(lexer.TOKEN_ILLEGAL) {
+		p.addError(fmt.Sprintf("illegal character '%s' in struct body", p.curToken.Literal))
+		p.nextToken()
+		if p.curTokenIs(lexer.TOKEN_RBRACE) || p.curTokenIs(lexer.TOKEN_EOF) {
+			return nil
+		}
+	}
+
+	// 首先收集字段标签
+	tags := p.collectFieldTags()
+
 	visibility := "private" // 默认 private
 
 	// 检查可见性修饰符
@@ -611,12 +677,20 @@ func (p *Parser) parseStructMember() interface{} {
 	// 解析成员
 	switch p.curToken.Type {
 	case lexer.TOKEN_VAR:
-		return p.parseStructFieldWithVar(visibility)
+		field := p.parseStructFieldWithVar(visibility)
+		if field != nil {
+			field.Tags = tags
+		}
+		return field
 	case lexer.TOKEN_FUNC:
 		return p.parseStructMethod(visibility)
 	case lexer.TOKEN_IDENT:
 		// 可能是嵌入类型或字段
-		return p.parseStructFieldOrEmbed(visibility)
+		result := p.parseStructFieldOrEmbed(visibility)
+		if field, ok := result.(*StructField); ok && field != nil {
+			field.Tags = tags
+		}
+		return result
 	default:
 		return nil
 	}
@@ -866,6 +940,18 @@ func (p *Parser) parseClassDeclFull(public bool, abstract bool, static bool) *Cl
 
 // parseClassMember 解析类成员（字段或方法）
 func (p *Parser) parseClassMember() interface{} {
+	// 检查非法 token，跳过直到找到有效的成员开始
+	for p.curTokenIs(lexer.TOKEN_ILLEGAL) {
+		p.addError(fmt.Sprintf("illegal character '%s' in class body", p.curToken.Literal))
+		p.nextToken()
+		if p.curTokenIs(lexer.TOKEN_RBRACE) || p.curTokenIs(lexer.TOKEN_EOF) {
+			return nil
+		}
+	}
+
+	// 首先收集字段标签
+	tags := p.collectFieldTags()
+
 	visibility := "private" // 默认 private
 
 	// 检查可见性修饰符
@@ -897,12 +983,20 @@ func (p *Parser) parseClassMember() interface{} {
 	// 解析成员
 	switch p.curToken.Type {
 	case lexer.TOKEN_VAR:
-		return p.parseClassField(visibility, isStatic)
+		field := p.parseClassField(visibility, isStatic)
+		if field != nil {
+			field.Tags = tags
+		}
+		return field
 	case lexer.TOKEN_FUNC:
 		return p.parseClassMethodWithAbstract(visibility, isStatic, isAbstract)
 	case lexer.TOKEN_IDENT:
 		// 可能是类型声明，如 "string title" 或 "name string"
-		return p.parseClassFieldShort(visibility, isStatic)
+		field := p.parseClassFieldShort(visibility, isStatic)
+		if field != nil {
+			field.Tags = tags
+		}
+		return field
 	default:
 		return nil
 	}

@@ -129,6 +129,9 @@ const (
 
 	// 模式匹配
 	TOKEN_MATCH // match
+
+	// 字段标签
+	TOKEN_TAG // #key:value 或 #key:"value"
 )
 
 // Token 表示一个词法单元
@@ -291,6 +294,7 @@ func TokenTypeName(t TokenType) string {
 		TOKEN_CATCH:      "catch",
 		TOKEN_THROW:      "throw",
 		TOKEN_MATCH:      "match",
+		TOKEN_TAG:        "TAG",
 	}
 	if name, ok := names[t]; ok {
 		return name

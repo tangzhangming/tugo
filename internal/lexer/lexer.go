@@ -222,6 +222,10 @@ func (l *Lexer) NextToken() Token {
 	case '`':
 		tok.Type = TOKEN_STRING
 		tok.Literal = l.readRawString()
+	case '#':
+		tok.Type = TOKEN_TAG
+		tok.Literal = l.readTag()
+		return tok
 	case 0:
 		tok.Literal = ""
 		tok.Type = TOKEN_EOF
@@ -400,6 +404,50 @@ func (l *Lexer) readBlockComment() string {
 		}
 		l.readChar()
 	}
+	return l.input[pos:l.pos]
+}
+
+// readTag 读取字段标签
+// 格式: #key:value 或 #key:"value"
+func (l *Lexer) readTag() string {
+	pos := l.pos
+	l.readChar() // 跳过 #
+
+	// 读取 key (标识符字符)
+	for l.isLetter(l.ch) || l.isDigit(l.ch) || l.ch == '_' {
+		l.readChar()
+	}
+
+	// 期望 :
+	if l.ch != ':' {
+		return l.input[pos:l.pos]
+	}
+	l.readChar() // 跳过 :
+
+	// 读取 value
+	if l.ch == '"' {
+		// 带引号的值
+		l.readChar() // 跳过开头的 "
+		for {
+			if l.ch == '"' {
+				l.readChar() // 包含结尾的 "
+				break
+			}
+			if l.ch == '\\' {
+				l.readChar() // 跳过转义字符
+			}
+			if l.ch == 0 || l.ch == '\n' {
+				break
+			}
+			l.readChar()
+		}
+	} else {
+		// 不带引号的值 (读取到空白或换行)
+		for l.ch != ' ' && l.ch != '\t' && l.ch != '\n' && l.ch != '\r' && l.ch != 0 {
+			l.readChar()
+		}
+	}
+
 	return l.input[pos:l.pos]
 }
 
