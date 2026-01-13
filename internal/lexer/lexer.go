@@ -170,6 +170,8 @@ func (l *Lexer) NextToken() Token {
 		tok = l.newToken(TOKEN_BIT_XOR, l.ch)
 	case '~':
 		tok = l.newToken(TOKEN_BIT_NOT, l.ch)
+	case '?':
+		tok = l.newToken(TOKEN_QUESTION, l.ch)
 	case ',':
 		tok = l.newToken(TOKEN_COMMA, l.ch)
 	case ';':

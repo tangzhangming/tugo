@@ -54,6 +54,7 @@ const (
 	TOKEN_DEFINE       // :=
 	TOKEN_ARROW        // ->
 	TOKEN_DOUBLE_COLON // ::
+	TOKEN_QUESTION     // ?
 
 	// 分隔符
 	TOKEN_COMMA     // ,
@@ -226,6 +227,7 @@ func TokenTypeName(t TokenType) string {
 		TOKEN_DEFINE:       ":=",
 		TOKEN_ARROW:        "->",
 		TOKEN_DOUBLE_COLON: "::",
+		TOKEN_QUESTION:     "?",
 		TOKEN_COMMA:     ",",
 		TOKEN_SEMICOLON: ";",
 		TOKEN_COLON:     ":",

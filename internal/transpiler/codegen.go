@@ -29,6 +29,8 @@ type CodeGen struct {
 	inTryBlock         bool                 // 是否在 try 块内
 	methodOverloads    map[string]bool      // 当前类/结构体的重载方法名 (key: methodName)
 	varTypes           map[string]string    // 变量名到类型名的映射（用于重载解析）
+	ternaryCounter     int                  // 三元表达式计数器（用于生成唯一临时变量名）
+	pendingStatements  []string             // 需要在当前语句前插入的代码
 }
 
 // NewCodeGen 创建一个新的代码生成器
@@ -1816,6 +1818,16 @@ func (g *CodeGen) generateShortVarDecl(decl *parser.ShortVarDecl) {
 // trackVarType 跟踪变量类型
 func (g *CodeGen) trackVarType(varName string, value parser.Expression) {
 	switch v := value.(type) {
+	case *parser.IntegerLiteral:
+		g.varTypes[varName] = "int"
+	case *parser.FloatLiteral:
+		g.varTypes[varName] = "float64"
+	case *parser.StringLiteral:
+		g.varTypes[varName] = "string"
+	case *parser.CharLiteral:
+		g.varTypes[varName] = "rune"
+	case *parser.BoolLiteral:
+		g.varTypes[varName] = "bool"
 	case *parser.NewExpr:
 		// new ClassName() -> 类型是 ClassName
 		if ident, ok := v.Type.(*parser.Identifier); ok {
@@ -1836,6 +1848,12 @@ func (g *CodeGen) trackVarType(varName string, value parser.Expression) {
 		// StructName{} -> 类型是结构体名
 		if ident, ok := v.Type.(*parser.Identifier); ok {
 			g.varTypes[varName] = ident.Value
+		}
+	case *parser.TernaryExpr:
+		// 三元表达式的类型由 true 分支决定
+		trueType := g.inferExprType(v.TrueExpr)
+		if trueType != "any" && trueType != "" {
+			g.varTypes[varName] = trueType
 		}
 	}
 }
@@ -2837,6 +2855,8 @@ func (g *CodeGen) generateExpression(expr parser.Expression) string {
 		return g.generateStaticAccessExpr(e)
 	case *parser.BinaryExpr:
 		return g.generateBinaryExpr(e)
+	case *parser.TernaryExpr:
+		return g.generateTernaryExpr(e)
 	case *parser.UnaryExpr:
 		return g.generateUnaryExpr(e)
 	case *parser.CallExpr:
@@ -2928,6 +2948,50 @@ func (g *CodeGen) generateBinaryExpr(expr *parser.BinaryExpr) string {
 	left := g.generateExpression(expr.Left)
 	right := g.generateExpression(expr.Right)
 	return left + " " + expr.Operator + " " + right
+}
+
+// generateTernaryExpr 生成三元表达式
+// 将 condition ? trueExpr : falseExpr 展开为临时变量 + if 结构
+func (g *CodeGen) generateTernaryExpr(expr *parser.TernaryExpr) string {
+	// 先推断两个分支的类型
+	trueType := g.inferExprType(expr.TrueExpr)
+	falseType := g.inferExprType(expr.FalseExpr)
+
+	// 检查类型是否一致
+	if trueType != "any" && falseType != "any" && trueType != falseType {
+		g.transpiler.AddError(expr.Token.Line, expr.Token.Column,
+			i18n.T(i18n.ErrTernaryTypeMismatch, trueType, falseType))
+		return "nil"
+	}
+
+	// 生成条件和分支表达式
+	condExpr := g.generateExpression(expr.Condition)
+	trueExprStr := g.generateExpression(expr.TrueExpr)
+	falseExprStr := g.generateExpression(expr.FalseExpr)
+
+	// 确定最终类型
+	resultType := trueType
+	if resultType == "any" {
+		resultType = falseType
+	}
+
+	// 根据类型决定生成方式
+	if resultType != "any" && resultType != "" {
+		// 已知类型，使用类型化的 IIFE
+		return fmt.Sprintf("func() %s { if %s { return %s }; return %s }()", resultType, condExpr, trueExprStr, falseExprStr)
+	}
+	
+	// 未知类型，使用 any 并在运行时处理
+	// 这种情况下，用户需要确保类型一致或进行类型断言
+	return fmt.Sprintf("func() any { if %s { return %s }; return %s }()", condExpr, trueExprStr, falseExprStr)
+}
+
+// flushPendingStatements 输出并清空待处理语句
+func (g *CodeGen) flushPendingStatements() {
+	for _, stmt := range g.pendingStatements {
+		g.writeLine(stmt)
+	}
+	g.pendingStatements = nil
 }
 
 // generateUnaryExpr 生成一元表达式
@@ -3620,8 +3684,10 @@ func (g *CodeGen) inferExprType(expr parser.Expression) string {
 	case *parser.NilLiteral:
 		return "nil"
 	case *parser.Identifier:
-		// 查找变量类型（简化：返回 any）
-		// 实际实现需要维护变量类型表
+		// 查找变量类型
+		if typeName, ok := g.varTypes[e.Value]; ok {
+			return typeName
+		}
 		return "any"
 	case *parser.UnaryExpr:
 		if e.Operator == "&" {

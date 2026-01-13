@@ -63,6 +63,9 @@ var zhMessages = map[string]string{
 	ErrPrivateMethodAccess: "%s: 无法访问 %s 的私有方法 '%s'",
 	ErrPrivateFieldAccess:  "%s: 无法访问 %s 的私有字段 '%s'",
 
+	// Ternary expression errors
+	ErrTernaryTypeMismatch: "三元表达式类型不匹配: true分支是 '%s', false分支是 '%s'",
+
 	// CLI - Usage and help
 	MsgUsage:          "用法: tugo <命令> [参数]",
 	MsgCommands:       "命令:",

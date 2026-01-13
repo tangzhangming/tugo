@@ -557,6 +557,17 @@ type BinaryExpr struct {
 func (b *BinaryExpr) TokenLiteral() string { return b.Token.Literal }
 func (b *BinaryExpr) expressionNode()      {}
 
+// TernaryExpr 三元表达式 (condition ? trueExpr : falseExpr)
+type TernaryExpr struct {
+	Token     lexer.Token // ? token
+	Condition Expression
+	TrueExpr  Expression
+	FalseExpr Expression
+}
+
+func (t *TernaryExpr) TokenLiteral() string { return t.Token.Literal }
+func (t *TernaryExpr) expressionNode()      {}
+
 // UnaryExpr 一元表达式
 type UnaryExpr struct {
 	Token    lexer.Token

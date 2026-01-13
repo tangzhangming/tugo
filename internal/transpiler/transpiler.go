@@ -23,6 +23,12 @@ type Transpiler struct {
 	skipValidation bool                               // 跳过顶层语句验证（用于标准库）
 }
 
+// AddError 添加转译错误
+func (t *Transpiler) AddError(line, col int, msg string) {
+	formatted := i18n.T(i18n.ErrGeneric, line, col, msg)
+	t.errors = append(t.errors, formatted)
+}
+
 // New 创建一个新的转译器
 func New(table *symbol.Table) *Transpiler {
 	return &Transpiler{

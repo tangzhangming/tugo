@@ -1708,6 +1708,7 @@ func (p *Parser) parseExpressionList() []Expression {
 const (
 	_ int = iota
 	LOWEST
+	TERNARY     // ? :
 	OR          // ||
 	AND         // &&
 	EQUALS      // == !=
@@ -1720,6 +1721,7 @@ const (
 )
 
 var precedences = map[lexer.TokenType]int{
+	lexer.TOKEN_QUESTION: TERNARY,
 	lexer.TOKEN_OR:       OR,
 	lexer.TOKEN_AND:      AND,
 	lexer.TOKEN_EQ:       EQUALS,
@@ -1831,6 +1833,9 @@ func (p *Parser) parseExpression(precedence int) Expression {
 			lexer.TOKEN_SHL, lexer.TOKEN_SHR:
 			p.nextToken()
 			left = p.parseInfixExpression(left)
+		case lexer.TOKEN_QUESTION:
+			p.nextToken()
+			left = p.parseTernaryExpression(left)
 		case lexer.TOKEN_LPAREN:
 			p.nextToken()
 			left = p.parseCallExpression(left)
@@ -1901,6 +1906,30 @@ func (p *Parser) parseInfixExpression(left Expression) Expression {
 	precedence := p.curPrecedence()
 	p.nextToken()
 	expr.Right = p.parseExpression(precedence)
+	return expr
+}
+
+// parseTernaryExpression 解析三元表达式 (condition ? trueExpr : falseExpr)
+func (p *Parser) parseTernaryExpression(condition Expression) Expression {
+	expr := &TernaryExpr{
+		Token:     p.curToken, // ? token
+		Condition: condition,
+	}
+
+	// 解析 true 分支表达式
+	p.nextToken()
+	expr.TrueExpr = p.parseExpression(TERNARY)
+
+	// 期望 : token
+	if !p.expectPeek(lexer.TOKEN_COLON) {
+		p.addError("expected ':' in ternary expression")
+		return nil
+	}
+
+	// 解析 false 分支表达式
+	p.nextToken()
+	expr.FalseExpr = p.parseExpression(TERNARY)
+
 	return expr
 }
 

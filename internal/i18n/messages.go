@@ -65,6 +65,9 @@ const (
 	// Visibility errors
 	ErrPrivateMethodAccess = "transpiler.private_method_access" // args: callerClass, targetClass, methodName
 	ErrPrivateFieldAccess  = "transpiler.private_field_access"  // args: callerClass, targetClass, fieldName
+
+	// Ternary expression errors
+	ErrTernaryTypeMismatch = "codegen.ternary_type_mismatch" // args: trueType, falseType
 )
 
 // Message keys for CLI

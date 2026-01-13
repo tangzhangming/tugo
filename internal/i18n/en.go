@@ -63,6 +63,9 @@ var enMessages = map[string]string{
 	ErrPrivateMethodAccess: "%s: cannot access %s's private method '%s'",
 	ErrPrivateFieldAccess:  "%s: cannot access %s's private field '%s'",
 
+	// Ternary expression errors
+	ErrTernaryTypeMismatch: "ternary expression type mismatch: true branch is '%s', false branch is '%s'",
+
 	// CLI - Usage and help
 	MsgUsage:          "Usage: tugo <command> [arguments]",
 	MsgCommands:       "Commands:",
