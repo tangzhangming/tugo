@@ -53,7 +53,8 @@ func collectTugoImports(files []*parser.File) map[string]bool {
 		// 收集显式导入
 		for _, imp := range file.Imports {
 			for _, spec := range imp.Specs {
-				if spec.FromTugo {
+				// 检查是否是 tugo 标准库导入（use 语句且路径以 tugo. 开头）
+				if !spec.IsGoImport && len(spec.Path) >= 5 && spec.Path[:5] == "tugo." {
 					// tugo.lang.Str -> tugo/lang
 					imports[spec.PkgPath] = true
 				}
