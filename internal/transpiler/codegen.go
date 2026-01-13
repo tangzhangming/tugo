@@ -30,6 +30,7 @@ type CodeGen struct {
 	methodOverloads    map[string]bool      // 当前类/结构体的重载方法名 (key: methodName)
 	varTypes           map[string]string    // 变量名到类型名的映射（用于重载解析）
 	ternaryCounter     int                  // 三元表达式计数器（用于生成唯一临时变量名）
+	matchCounter       int                  // match 表达式计数器（用于生成唯一临时变量名）
 	pendingStatements  []string             // 需要在当前语句前插入的代码
 }
 
@@ -367,7 +368,9 @@ func (g *CodeGen) generateStatement(stmt parser.Statement) {
 		if g.currentFuncErrable && g.isErrableCall(s.Expression) {
 			g.generateErrableCallStmt(s.Expression)
 		} else {
-			g.writeLine(g.generateExpression(s.Expression))
+			exprStr := g.generateExpression(s.Expression)
+			g.flushPendingStatements()
+			g.writeLine(exprStr)
 		}
 	case *parser.SendStmt:
 		g.generateSendStmt(s)
@@ -1759,9 +1762,15 @@ func (g *CodeGen) generateVarDecl(decl *parser.VarDecl) {
 		sb.WriteString(g.generateType(decl.Type))
 	}
 
+	valueStr := ""
 	if decl.Value != nil {
+		valueStr = g.generateExpression(decl.Value)
+	}
+
+	g.flushPendingStatements()
+	if valueStr != "" {
 		sb.WriteString(" = ")
-		sb.WriteString(g.generateExpression(decl.Value))
+		sb.WriteString(valueStr)
 	}
 
 	g.writeLine(sb.String())
@@ -1806,11 +1815,14 @@ func (g *CodeGen) generateShortVarDecl(decl *parser.ShortVarDecl) {
 		for _, elem := range arrLit.Elements {
 			values = append(values, g.generateExpression(elem))
 		}
+		g.flushPendingStatements()
 		line := fmt.Sprintf("%s := %s", strings.Join(names, ", "), strings.Join(values, ", "))
 		g.writeLine(line)
 	} else {
 		// 单值或函数调用
-		line := fmt.Sprintf("%s := %s", strings.Join(names, ", "), g.generateExpression(decl.Value))
+		valueStr := g.generateExpression(decl.Value)
+		g.flushPendingStatements()
+		line := fmt.Sprintf("%s := %s", strings.Join(names, ", "), valueStr)
 		g.writeLine(line)
 	}
 }
@@ -1870,6 +1882,7 @@ func (g *CodeGen) generateAssignStmt(stmt *parser.AssignStmt) {
 		right = append(right, g.generateExpression(expr))
 	}
 
+	g.flushPendingStatements()
 	g.writeLine(strings.Join(left, ", ") + " " + stmt.Token.Literal + " " + strings.Join(right, ", "))
 }
 
@@ -1890,6 +1903,7 @@ func (g *CodeGen) generateReturnStmt(stmt *parser.ReturnStmt) {
 		values = append(values, g.generateExpression(v))
 	}
 
+	g.flushPendingStatements()
 	if g.currentFuncErrable {
 		// 检查是否返回的是一个errable调用
 		// 如果只有一个返回值且是errable调用，则不追加nil（错误会自动传播）
@@ -2857,6 +2871,8 @@ func (g *CodeGen) generateExpression(expr parser.Expression) string {
 		return g.generateBinaryExpr(e)
 	case *parser.TernaryExpr:
 		return g.generateTernaryExpr(e)
+	case *parser.MatchExpr:
+		return g.generateMatchExpr(e)
 	case *parser.UnaryExpr:
 		return g.generateUnaryExpr(e)
 	case *parser.CallExpr:
@@ -2989,9 +3005,104 @@ func (g *CodeGen) generateTernaryExpr(expr *parser.TernaryExpr) string {
 // flushPendingStatements 输出并清空待处理语句
 func (g *CodeGen) flushPendingStatements() {
 	for _, stmt := range g.pendingStatements {
-		g.writeLine(stmt)
+		// 按行写入，保持正确缩进
+		lines := strings.Split(stmt, "\n")
+		for _, line := range lines {
+			if line != "" {
+				g.writeLine(line)
+			}
+		}
 	}
 	g.pendingStatements = nil
+}
+
+// generateMatchExpr 生成 match 表达式
+// 将 match(expr) { pattern => result, ... } 展开为临时变量 + switch 语句
+func (g *CodeGen) generateMatchExpr(expr *parser.MatchExpr) string {
+	g.matchCounter++
+	varName := fmt.Sprintf("__match_%d", g.matchCounter)
+
+	// 推断结果类型（从第一个非 default 分支）
+	resultType := "any"
+	for _, arm := range expr.Arms {
+		if !arm.IsDefault && arm.Body != nil {
+			inferredType := g.inferExprType(arm.Body)
+			if inferredType != "any" && inferredType != "" {
+				resultType = inferredType
+				break
+			}
+		}
+	}
+
+	subject := g.generateExpression(expr.Subject)
+	
+	var sb strings.Builder
+	
+	// 声明临时变量
+	sb.WriteString(fmt.Sprintf("var %s %s\n", varName, resultType))
+	
+	if expr.IsType {
+		// 类型匹配 switch
+		sb.WriteString(fmt.Sprintf("switch __v := %s.(type) {\n", subject))
+		
+		for _, arm := range expr.Arms {
+			if arm.IsDefault {
+				sb.WriteString("default:\n")
+			} else {
+				sb.WriteString("case ")
+				for i, pattern := range arm.Patterns {
+					if i > 0 {
+						sb.WriteString(", ")
+					}
+					// 类型匹配，需要加 * 前缀（假设是指针类型）
+					typeName := g.generateExpression(pattern)
+					sb.WriteString("*" + typeName)
+				}
+				sb.WriteString(":\n")
+			}
+			
+			// 生成分支体，类型匹配时使用 __v 代替原始变量
+			bodyExpr := g.generateMatchArmBody(arm.Body, subject, "__v")
+			sb.WriteString(fmt.Sprintf("\t%s = %s\n", varName, bodyExpr))
+		}
+	} else {
+		// 值匹配 switch
+		sb.WriteString(fmt.Sprintf("switch %s {\n", subject))
+		
+		for _, arm := range expr.Arms {
+			if arm.IsDefault {
+				sb.WriteString("default:\n")
+			} else {
+				sb.WriteString("case ")
+				for i, pattern := range arm.Patterns {
+					if i > 0 {
+						sb.WriteString(", ")
+					}
+					sb.WriteString(g.generateExpression(pattern))
+				}
+				sb.WriteString(":\n")
+			}
+			
+			bodyExpr := g.generateExpression(arm.Body)
+			sb.WriteString(fmt.Sprintf("\t%s = %s\n", varName, bodyExpr))
+		}
+	}
+	
+	sb.WriteString("}")
+	
+	// 将 switch 语句添加到待处理语句
+	g.pendingStatements = append(g.pendingStatements, sb.String())
+	
+	return varName
+}
+
+// generateMatchArmBody 生成 match 分支体
+// 对于类型匹配，需要将 subject 替换为类型转换后的变量
+func (g *CodeGen) generateMatchArmBody(body parser.Expression, subject, typedVar string) string {
+	// 简单实现：直接生成表达式
+	// 如果表达式中引用了 subject，应该替换为 typedVar
+	// 这里先用简单实现，后续可以增强
+	return g.generateExpression(body)
 }
 
 // generateUnaryExpr 生成一元表达式

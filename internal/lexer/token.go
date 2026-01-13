@@ -53,6 +53,7 @@ const (
 
 	TOKEN_DEFINE       // :=
 	TOKEN_ARROW        // ->
+	TOKEN_FAT_ARROW    // =>
 	TOKEN_DOUBLE_COLON // ::
 	TOKEN_QUESTION     // ?
 
@@ -123,6 +124,9 @@ const (
 	TOKEN_TRY   // try
 	TOKEN_CATCH // catch
 	TOKEN_THROW // throw
+
+	// 模式匹配
+	TOKEN_MATCH // match
 )
 
 // Token 表示一个词法单元
@@ -182,6 +186,7 @@ var keywords = map[string]TokenType{
 	"try":        TOKEN_TRY,
 	"catch":      TOKEN_CATCH,
 	"throw":      TOKEN_THROW,
+	"match":      TOKEN_MATCH,
 }
 
 // LookupIdent 查找标识符是否为关键字
@@ -226,6 +231,7 @@ func TokenTypeName(t TokenType) string {
 		TOKEN_SHR:       ">>",
 		TOKEN_DEFINE:       ":=",
 		TOKEN_ARROW:        "->",
+		TOKEN_FAT_ARROW:    "=>",
 		TOKEN_DOUBLE_COLON: "::",
 		TOKEN_QUESTION:     "?",
 		TOKEN_COMMA:     ",",
@@ -278,6 +284,7 @@ func TokenTypeName(t TokenType) string {
 		TOKEN_TRY:        "try",
 		TOKEN_CATCH:      "catch",
 		TOKEN_THROW:      "throw",
+		TOKEN_MATCH:      "match",
 	}
 	if name, ok := names[t]; ok {
 		return name

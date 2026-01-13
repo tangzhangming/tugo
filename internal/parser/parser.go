@@ -1819,6 +1819,8 @@ func (p *Parser) parseExpression(precedence int) Expression {
 		left = p.parseInterfaceType()
 	case lexer.TOKEN_CHAN:
 		left = p.parseChanType()
+	case lexer.TOKEN_MATCH:
+		left = p.parseMatchExpression()
 	default:
 		return nil
 	}
@@ -1931,6 +1933,97 @@ func (p *Parser) parseTernaryExpression(condition Expression) Expression {
 	expr.FalseExpr = p.parseExpression(TERNARY)
 
 	return expr
+}
+
+// parseMatchExpression 解析 match 表达式
+// match(expr) { pattern => result, ... }
+func (p *Parser) parseMatchExpression() Expression {
+	expr := &MatchExpr{Token: p.curToken}
+
+	// 期望 (
+	if !p.expectPeek(lexer.TOKEN_LPAREN) {
+		return nil
+	}
+
+	// 解析被匹配的表达式
+	p.nextToken()
+	expr.Subject = p.parseExpression(LOWEST)
+
+	// 期望 )
+	if !p.expectPeek(lexer.TOKEN_RPAREN) {
+		return nil
+	}
+
+	// 期望 {
+	if !p.expectPeek(lexer.TOKEN_LBRACE) {
+		return nil
+	}
+
+	// 解析匹配分支
+	for !p.peekTokenIs(lexer.TOKEN_RBRACE) && !p.peekTokenIs(lexer.TOKEN_EOF) {
+		arm := p.parseMatchArm()
+		if arm != nil {
+			expr.Arms = append(expr.Arms, arm)
+			// 检查是否有类型模式（首字母大写的标识符）
+			if !arm.IsDefault && len(arm.Patterns) > 0 {
+				if ident, ok := arm.Patterns[0].(*Identifier); ok {
+					if len(ident.Value) > 0 && ident.Value[0] >= 'A' && ident.Value[0] <= 'Z' {
+						expr.IsType = true
+					}
+				}
+			}
+		}
+
+		// 跳过逗号（可选）
+		if p.peekTokenIs(lexer.TOKEN_COMMA) {
+			p.nextToken()
+		}
+	}
+
+	// 期望 }
+	if !p.expectPeek(lexer.TOKEN_RBRACE) {
+		return nil
+	}
+
+	return expr
+}
+
+// parseMatchArm 解析单个匹配分支
+func (p *Parser) parseMatchArm() *MatchArm {
+	p.nextToken()
+	arm := &MatchArm{}
+
+	// 检查是否是 default 分支
+	if p.curTokenIs(lexer.TOKEN_DEFAULT) {
+		arm.IsDefault = true
+	} else {
+		// 解析模式列表（可以是多个值，用逗号分隔）
+		arm.Patterns = append(arm.Patterns, p.parseExpression(LOWEST))
+
+		for p.peekTokenIs(lexer.TOKEN_COMMA) {
+			// 检查逗号后面是不是 => 或 }，如果是则这个逗号是分隔符不是模式的一部分
+			p.nextToken() // 跳过逗号
+			if p.peekTokenIs(lexer.TOKEN_FAT_ARROW) || p.peekTokenIs(lexer.TOKEN_RBRACE) {
+				// 这是结尾的逗号，回退
+				break
+			}
+			p.nextToken()
+			arm.Patterns = append(arm.Patterns, p.parseExpression(LOWEST))
+		}
+	}
+
+	// 期望 =>
+	if !p.expectPeek(lexer.TOKEN_FAT_ARROW) {
+		p.addError("expected '=>' in match arm")
+		return nil
+	}
+	arm.Token = p.curToken
+
+	// 解析结果表达式
+	p.nextToken()
+	arm.Body = p.parseExpression(LOWEST)
+
+	return arm
 }
 
 // parseCallExpression 解析函数调用表达式

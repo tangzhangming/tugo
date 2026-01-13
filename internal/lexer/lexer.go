@@ -63,6 +63,9 @@ func (l *Lexer) NextToken() Token {
 		if l.peekChar() == '=' {
 			l.readChar()
 			tok = Token{Type: TOKEN_EQ, Literal: "==", Line: tok.Line, Column: tok.Column}
+		} else if l.peekChar() == '>' {
+			l.readChar()
+			tok = Token{Type: TOKEN_FAT_ARROW, Literal: "=>", Line: tok.Line, Column: tok.Column}
 		} else {
 			tok = l.newToken(TOKEN_ASSIGN, l.ch)
 		}

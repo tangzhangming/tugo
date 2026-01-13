@@ -568,6 +568,26 @@ type TernaryExpr struct {
 func (t *TernaryExpr) TokenLiteral() string { return t.Token.Literal }
 func (t *TernaryExpr) expressionNode()      {}
 
+// MatchExpr match 表达式
+// match(expr) { pattern => result, ... }
+type MatchExpr struct {
+	Token   lexer.Token  // match token
+	Subject Expression   // 被匹配的表达式
+	Arms    []*MatchArm  // 匹配分支
+	IsType  bool         // 是否是类型匹配
+}
+
+func (m *MatchExpr) TokenLiteral() string { return m.Token.Literal }
+func (m *MatchExpr) expressionNode()      {}
+
+// MatchArm 匹配分支
+type MatchArm struct {
+	Token    lexer.Token  // => token
+	Patterns []Expression // 匹配模式（可以是多个值，用逗号分隔）
+	IsDefault bool        // 是否是 default 分支
+	Body     Expression   // 分支结果表达式
+}
+
 // UnaryExpr 一元表达式
 type UnaryExpr struct {
 	Token    lexer.Token
