@@ -4809,129 +4809,236 @@ func (g *CodeGen) generateStructType(t *parser.StructType) string {
 }
 
 // generateNewExpr 生成 new 表达式
-// 支持两种情况:
-// 1. Go 风格: new(Type) -> new(Type)
-// 2. OOP 风格: new ClassName() -> NewClassName(NewDefaultClassNameInitOpts())
-//             new ClassName(name: "test") -> NewClassName(ClassNameInitOpts{Name: "test"})
-// 3. 泛型: new ClassName[T]() -> New__ClassName[T]()
-// 4. 带包前缀: new pkg.ClassName() -> pkg.New__ClassName()
+//
+// ==================== 重要：构造函数生成规则 ====================
+//
+// tugo 的构造函数生成需要处理多种场景，这是一个容易出 bug 的地方。
+// 请仔细阅读以下规则，修改时务必考虑所有场景！
+//
+// 【场景分类】
+//
+// 1. 无 init 方法的类:
+//    tugo: new Simple()
+//    go:   New__Simple()
+//
+// 2. 有无参 init 方法的类:
+//    tugo: new Simple()
+//    go:   New__Simple()
+//
+// 3. 有带参数的 init（无默认值）:
+//    tugo: new User("test")
+//    go:   New__User("test")
+//
+// 4. 有带默认参数的 init（关键场景，容易出 bug！）:
+//    tugo: public func init(id: int = 0, name: string = "默认")
+//    无参调用: new Role()     -> New__Role(NewDefault__Role__InitOpts())
+//    命名参数: new Role(name: "x") -> New__Role(Role__InitOpts{Name: "x"})
+//
+// 5. 多个 init 重载:
+//    根据参数数量和类型匹配对应的构造函数
+//
+// 6. 跨包引用（通过 use 导入）:
+//    tugo: use "pkg.models.Role"; new Role()
+//    go:   models.New__Role(models.NewDefault__Role__InitOpts())
+//    注意：需要通过 PreloadDeclarations 预加载其他包的类声明！
+//
+// 【核心判断逻辑】
+//
+// - classDecl == nil: 找不到类声明（可能是外部包未预加载），使用简单调用
+// - classDecl.InitMethod == nil: 类没有 init 方法，使用 New__X()
+// - len(classDecl.InitMethod.Params) == 0: init 无参数，使用 New__X()
+// - len(classDecl.InitMethod.Params) > 0: init 有参数，使用 opts 模式
+//
+// ================================================================
 func (g *CodeGen) generateNewExpr(expr *parser.NewExpr) string {
-	// 获取类名和类型参数
+	// ========== 第一步：解析类名和类型参数 ==========
 	className := ""
-	typeArgs := "" // 泛型类型参数 [T, K, ...]
-	pkgPrefix := ""
-	classPkg := g.transpiler.pkg // 默认当前包
+	typeArgs := ""              // 泛型类型参数 [T, K, ...]
+	pkgPrefix := ""             // Go 包前缀，如 "models."
+	classPkg := g.transpiler.pkg // 类所在的包名，用于查找类声明
 
-	if ident, ok := expr.Type.(*parser.Identifier); ok {
-		className = ident.Value
-	} else if sel, ok := expr.Type.(*parser.SelectorExpr); ok {
-		// pkg.ClassName 形式
-		if pkgIdent, ok := sel.X.(*parser.Identifier); ok {
+	switch t := expr.Type.(type) {
+	case *parser.Identifier:
+		// 简单类名: new Role()
+		className = t.Value
+
+	case *parser.SelectorExpr:
+		// 带包前缀: new pkg.ClassName()
+		if pkgIdent, ok := t.X.(*parser.Identifier); ok {
 			pkgPrefix = pkgIdent.Value + "."
 			classPkg = pkgIdent.Value
 		}
-		className = sel.Sel
-	} else if gt, ok := expr.Type.(*parser.GenericType); ok {
-		// 泛型类型: Box[string]
-		if ident, ok := gt.Type.(*parser.Identifier); ok {
-			className = ident.Value
-		} else if sel, ok := gt.Type.(*parser.SelectorExpr); ok {
-			// pkg.ClassName[T] 形式
-			if pkgIdent, ok := sel.X.(*parser.Identifier); ok {
+		className = t.Sel
+
+	case *parser.GenericType:
+		// 泛型类型: new Box[string]()
+		switch inner := t.Type.(type) {
+		case *parser.Identifier:
+			className = inner.Value
+		case *parser.SelectorExpr:
+			if pkgIdent, ok := inner.X.(*parser.Identifier); ok {
 				pkgPrefix = pkgIdent.Value + "."
 				classPkg = pkgIdent.Value
 			}
-			className = sel.Sel
-		} else {
-			// 复杂类型，使用 Go 风格
+			className = inner.Sel
+		default:
+			// 复杂类型，回退到 Go 风格
 			return "new(" + g.generateType(expr.Type) + ")"
 		}
 		// 生成类型参数
 		var typeArgStrs []string
-		for _, arg := range gt.TypeArgs {
+		for _, arg := range t.TypeArgs {
 			typeArgStrs = append(typeArgStrs, g.generateType(arg))
 		}
 		typeArgs = "[" + strings.Join(typeArgStrs, ", ") + "]"
-	} else {
-		// Go 风格的 new(Type)
+
+	default:
+		// 其他情况，使用 Go 风格的 new(Type)
 		return "new(" + g.generateType(expr.Type) + ")"
 	}
 
-	// OOP 风格的 new ClassName(args)
-	// 检查是否是导入的类型（通过 use 语句）
+	// ========== 第二步：处理 use 导入的类型 ==========
+	// 如果类是通过 use 语句导入的，需要获取正确的包名
+	// 例如: use "com.example.demo.models.Role" 会将 Role 映射到 models 包
 	if pkgPrefix == "" {
 		if pkg, ok := g.typeToPackage[className]; ok {
 			pkgPrefix = pkg + "."
-			classPkg = pkg // 使用导入的包名
+			classPkg = pkg
 		}
 	}
 
-	// 查找类声明以确定是否公开和是否有 init 参数
+	// ========== 第三步：查找类声明 ==========
+	// 注意：跨包引用需要先调用 PreloadDeclarations 预加载所有文件的声明
+	// 否则这里会找不到类声明，导致生成错误的代码
 	classDecl := g.transpiler.GetClassDecl(classPkg, className)
+	
+	// 确定类是否公开（用于生成正确的 Go 名称）
 	isClassPublic := true
 	if classDecl != nil {
 		isClassPublic = classDecl.Public
 	}
 	goClassName := symbol.ToGoName(className, isClassPublic)
 
-	// 生成参数表达式
+	// ========== 第四步：生成参数表达式 ==========
 	var argStrs []string
 	for _, arg := range expr.Arguments {
 		argStrs = append(argStrs, g.generateExpression(arg))
 	}
+	hasArgs := len(argStrs) > 0
 
-	// 查找匹配的构造函数
+	// ========== 第五步：处理多个 init 重载的情况 ==========
 	if classDecl != nil && len(classDecl.InitMethods) > 1 {
-		// 有多个 init 方法（真正的重载），需要选择匹配的
 		matchedInit := g.findMatchingInit(classDecl.InitMethods, expr.Arguments)
 		if matchedInit != nil {
-			// 检查是否有默认参数
+			return g.generateInitCall(pkgPrefix, goClassName, typeArgs, matchedInit, argStrs)
+		}
+	}
+
+	// ========== 第六步：处理单个 init 或无 init 的情况 ==========
+	
+	// 情况 A：找不到类声明（外部包未预加载）
+	// 只能根据是否有参数来猜测调用方式
+	if classDecl == nil {
+		if hasArgs {
+			// 有参数，尝试推断修饰名（用于方法重载）
+			mangledSuffix := g.inferMangledSuffix(expr.Arguments)
+			if mangledSuffix != "" {
+				return fmt.Sprintf("%sNew__%s%s%s(%s)", pkgPrefix, goClassName, mangledSuffix, typeArgs, strings.Join(argStrs, ", "))
+			}
+			// 无法推断，直接传参
+			return fmt.Sprintf("%sNew__%s%s(%s)", pkgPrefix, goClassName, typeArgs, strings.Join(argStrs, ", "))
+		}
+		// 无参数，使用简单调用
+		return fmt.Sprintf("%sNew__%s%s()", pkgPrefix, goClassName, typeArgs)
+	}
+
+	// 情况 B：找到类声明，根据 init 方法生成调用
+	initMethod := classDecl.InitMethod // 单个 init（或 InitMethods[0]）
+	
+	// B1: 类没有 init 方法 -> New__X()
+	if initMethod == nil {
+		if hasArgs {
+			return fmt.Sprintf("%sNew__%s%s(%s)", pkgPrefix, goClassName, typeArgs, strings.Join(argStrs, ", "))
+		}
+		return fmt.Sprintf("%sNew__%s%s()", pkgPrefix, goClassName, typeArgs)
+	}
+
+	// B2: init 有参数 -> 需要使用 opts 模式
+	// 【重要】这是容易出 bug 的地方！
+	// 即使调用时无参数 new Role()，如果 init 有带默认值的参数，
+	// 也需要生成 New__Role(NewDefault__Role__InitOpts())
+	if len(initMethod.Params) > 0 {
+		if hasArgs {
+			// 有参数调用: 根据是否有默认值决定使用 opts 结构体还是直接传参
 			hasDefault := false
-			for _, param := range matchedInit.Params {
+			for _, param := range initMethod.Params {
 				if param.DefaultValue != nil {
 					hasDefault = true
 					break
 				}
 			}
-			// 有默认参数的使用 opts 模式
-			if hasDefault && len(argStrs) == 0 {
-				return fmt.Sprintf("%sNew__%s(%sNewDefault__%s__InitOpts())", pkgPrefix, goClassName, pkgPrefix, goClassName)
+			if hasDefault {
+				// 有默认值，使用 opts 结构体（支持命名参数）
+				return g.generateConstructorOptsCall(pkgPrefix, goClassName, initMethod, expr.Arguments)
 			}
-			// 生成修饰后的构造函数名
-			constructorName := "New__" + goClassName
-			if len(matchedInit.Params) > 0 {
-				constructorName = symbol.GenerateMangledName("New__"+goClassName, matchedInit.Params, true)
-			}
-			if len(argStrs) == 0 {
-				return fmt.Sprintf("%s%s%s()", pkgPrefix, constructorName, typeArgs)
-			}
-			return fmt.Sprintf("%s%s%s(%s)", pkgPrefix, constructorName, typeArgs, strings.Join(argStrs, ", "))
+			// 无默认值，直接传参
+			return fmt.Sprintf("%sNew__%s%s(%s)", pkgPrefix, goClassName, typeArgs, strings.Join(argStrs, ", "))
+		}
+		// 【关键】无参数调用，但 init 有参数 -> 使用默认值
+		return fmt.Sprintf("%sNew__%s(%sNewDefault__%s__InitOpts())", pkgPrefix, goClassName, pkgPrefix, goClassName)
+	}
+
+	// B3: init 无参数 -> New__X()
+	if hasArgs {
+		return fmt.Sprintf("%sNew__%s%s(%s)", pkgPrefix, goClassName, typeArgs, strings.Join(argStrs, ", "))
+	}
+	return fmt.Sprintf("%sNew__%s%s()", pkgPrefix, goClassName, typeArgs)
+}
+
+// generateInitCall 为匹配的 init 方法生成调用代码
+func (g *CodeGen) generateInitCall(pkgPrefix, goClassName, typeArgs string, init *parser.ClassMethod, argStrs []string) string {
+	// 检查是否有默认参数
+	hasDefault := false
+	for _, param := range init.Params {
+		if param.DefaultValue != nil {
+			hasDefault = true
+			break
 		}
 	}
 
-	// 外部包的类：如果有参数，尝试生成修饰后的构造函数名
-	if classDecl == nil && len(expr.Arguments) > 0 {
-		// 根据参数类型推断修饰名
-		mangledSuffix := g.inferMangledSuffix(expr.Arguments)
-		if mangledSuffix != "" {
-			return fmt.Sprintf("%sNew__%s%s%s(%s)", pkgPrefix, goClassName, mangledSuffix, typeArgs, strings.Join(argStrs, ", "))
+	// 有默认参数且无参调用 -> 使用默认值
+	if hasDefault && len(argStrs) == 0 {
+		return fmt.Sprintf("%sNew__%s(%sNewDefault__%s__InitOpts())", pkgPrefix, goClassName, pkgPrefix, goClassName)
+	}
+
+	// 生成构造函数名（可能有重载修饰）
+	constructorName := "New__" + goClassName
+	if len(init.Params) > 0 {
+		constructorName = symbol.GenerateMangledName("New__"+goClassName, init.Params, true)
+	}
+
+	if len(argStrs) == 0 {
+		return fmt.Sprintf("%s%s%s()", pkgPrefix, constructorName, typeArgs)
+	}
+	return fmt.Sprintf("%s%s%s(%s)", pkgPrefix, constructorName, typeArgs, strings.Join(argStrs, ", "))
+}
+
+// generateConstructorOptsCall 生成构造函数的 opts 结构体调用
+// 用于 new ClassName(arg1, arg2) 这种有默认参数的构造函数调用
+func (g *CodeGen) generateConstructorOptsCall(pkgPrefix, goClassName string, init *parser.ClassMethod, args []parser.Expression) string {
+	optsName := fmt.Sprintf("%s%s__InitOpts", pkgPrefix, goClassName)
+	
+	// 生成 opts 结构体字面量（按位置参数顺序）
+	var fields []string
+	for i, arg := range args {
+		if i < len(init.Params) {
+			fieldName := symbol.ToGoName(init.Params[i].Name, true)
+			argVal := g.generateExpression(arg)
+			fields = append(fields, fmt.Sprintf("%s: %s", fieldName, argVal))
 		}
 	}
 
-	// 默认行为：单个 init 或无 init
-	if len(expr.Arguments) == 0 {
-		// 无参数调用
-		// 只有已知类有带参数的 init 时才使用 opts 模式
-		// 外部包的类（classDecl == nil）不假设需要 opts 模式，直接使用 New__X()
-		if classDecl != nil && classDecl.InitMethod != nil && len(classDecl.InitMethod.Params) > 0 {
-			// 已知类有带参数的 init: 使用 opts 模式
-			return fmt.Sprintf("%sNew__%s(%sNewDefault__%s__InitOpts())", pkgPrefix, goClassName, pkgPrefix, goClassName)
-		}
-		return fmt.Sprintf("%sNew__%s%s()", pkgPrefix, goClassName, typeArgs)
-	}
-
-	// 有参数: 生成直接调用
-	return fmt.Sprintf("%sNew__%s%s(%s)", pkgPrefix, goClassName, typeArgs, strings.Join(argStrs, ", "))
+	return fmt.Sprintf("%sNew__%s(%s{%s})", pkgPrefix, goClassName, optsName, strings.Join(fields, ", "))
 }
 
 // findMatchingInit 根据参数找到匹配的 init 方法

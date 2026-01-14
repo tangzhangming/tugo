@@ -63,6 +63,30 @@ func (t *Transpiler) GetConfig() *config.Config {
 	return t.config
 }
 
+// PreloadDeclarations 预加载所有文件的声明（在转译之前调用）
+// 这样跨包引用时可以找到其他包的类信息
+func (t *Transpiler) PreloadDeclarations(files []*parser.File) {
+	for _, file := range files {
+		pkg := file.Package
+		for _, stmt := range file.Statements {
+			switch decl := stmt.(type) {
+			case *parser.FuncDecl:
+				key := pkg + "." + decl.Name
+				t.funcDecls[key] = decl
+			case *parser.ClassDecl:
+				key := pkg + "." + decl.Name
+				t.classDecls[key] = decl
+			case *parser.InterfaceDecl:
+				key := pkg + "." + decl.Name
+				t.interfaceDecls[key] = decl
+			case *parser.StructDecl:
+				key := pkg + "." + decl.Name
+				t.structDecls[key] = decl
+			}
+		}
+	}
+}
+
 // TranspileFile 转译单个文件（无文件名）
 func (t *Transpiler) TranspileFile(file *parser.File) (string, error) {
 	return t.TranspileFileWithName(file, "")
