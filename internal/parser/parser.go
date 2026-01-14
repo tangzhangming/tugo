@@ -9,10 +9,11 @@ import (
 
 // Parser 语法分析器
 type Parser struct {
-	l         *lexer.Lexer
-	curToken  lexer.Token
-	peekToken lexer.Token
-	errors    []string
+	l                       *lexer.Lexer
+	curToken                lexer.Token
+	peekToken               lexer.Token
+	errors                  []string
+	disableStructLiteral    bool // 禁止解析结构体字面量（用于 switch/for 等语句）
 }
 
 // New 创建一个新的语法分析器
@@ -46,6 +47,16 @@ func (p *Parser) nextToken() {
 // curTokenIs 检查当前 token 类型
 func (p *Parser) curTokenIs(t lexer.TokenType) bool {
 	return p.curToken.Type == t
+}
+
+// isBuiltinFuncToken 检查当前token是否是可以用作方法名的内置函数token
+func (p *Parser) isBuiltinFuncToken() bool {
+	switch p.curToken.Type {
+	case lexer.TOKEN_DELETE, lexer.TOKEN_APPEND, lexer.TOKEN_LEN,
+		lexer.TOKEN_CAP, lexer.TOKEN_MAKE, lexer.TOKEN_NEW, lexer.TOKEN_COPY:
+		return true
+	}
+	return false
 }
 
 // peekTokenIs 检查下一个 token 类型
@@ -881,7 +892,18 @@ func (p *Parser) parseClassDeclFull(public bool, abstract bool, static bool) *Cl
 			p.addError("expected parent class name after extends")
 			return nil
 		}
-		decl.Extends = p.curToken.Literal
+		// 支持包限定的父类名，如 db.Model
+		parentName := p.curToken.Literal
+		for p.peekTokenIs(lexer.TOKEN_DOT) {
+			p.nextToken() // 移动到 .
+			p.nextToken() // 移动到下一个标识符
+			if !p.curTokenIs(lexer.TOKEN_IDENT) {
+				p.addError("expected identifier after '.' in parent class name")
+				return nil
+			}
+			parentName += "." + p.curToken.Literal
+		}
+		decl.Extends = parentName
 	}
 
 	// 静态类不能 implements
@@ -1090,8 +1112,8 @@ func (p *Parser) parseClassMethodWithAbstract(visibility string, isStatic bool, 
 	method := &ClassMethod{Token: p.curToken, Visibility: visibility, Static: isStatic, Abstract: isAbstract}
 	p.nextToken()
 
-	// 方法名
-	if !p.curTokenIs(lexer.TOKEN_IDENT) {
+	// 方法名 - 也允许某些内置函数名作为方法名
+	if !p.curTokenIs(lexer.TOKEN_IDENT) && !p.isBuiltinFuncToken() {
 		p.addError("expected method name")
 		return nil
 	}
@@ -1399,7 +1421,10 @@ func (p *Parser) parseForStmt() Statement {
 	// 如果是 range 关键字开头
 	if p.curTokenIs(lexer.TOKEN_RANGE) {
 		p.nextToken()
+		// 在 for 语句中，{ 是语句块的开始，不应被解析为结构体字面量
+		p.disableStructLiteral = true
 		x := p.parseExpression(LOWEST)
+		p.disableStructLiteral = false
 		if !p.expectPeek(lexer.TOKEN_LBRACE) {
 			return nil
 		}
@@ -1407,41 +1432,48 @@ func (p *Parser) parseForStmt() Statement {
 	}
 
 	// 解析第一个表达式
+	// 在 for 语句中，{ 是语句块的开始，不应被解析为结构体字面量
+	p.disableStructLiteral = true
 	firstExpr := p.parseExpression(LOWEST)
+	p.disableStructLiteral = false
 
-	// 检查是否是 range 循环
+	// 收集所有逗号分隔的表达式（可能是 range 循环的变量名）
+	var names []Expression
+	names = append(names, firstExpr)
+	
+	for p.peekTokenIs(lexer.TOKEN_COMMA) {
+		p.nextToken() // 跳过 ,
+		p.nextToken()
+		p.disableStructLiteral = true
+		names = append(names, p.parseExpression(LOWEST))
+		p.disableStructLiteral = false
+	}
+
+	// 检查是否是 range 循环 (k, v := range x 或 k, v = range x)
 	if p.peekTokenIs(lexer.TOKEN_DEFINE) || p.peekTokenIs(lexer.TOKEN_ASSIGN) {
-		// 可能是 k, v := range x 或 k, v = range x
-		var names []Expression
-		names = append(names, firstExpr)
+		p.nextToken() // 跳过 := 或 =
+		p.nextToken()
 
-		// 收集所有变量名
-		for p.peekTokenIs(lexer.TOKEN_COMMA) {
+		if p.curTokenIs(lexer.TOKEN_RANGE) {
 			p.nextToken()
-			p.nextToken()
-			names = append(names, p.parseExpression(LOWEST))
-		}
-
-		if p.peekTokenIs(lexer.TOKEN_DEFINE) || p.peekTokenIs(lexer.TOKEN_ASSIGN) {
-			p.nextToken()
-			p.nextToken()
-
-			if p.curTokenIs(lexer.TOKEN_RANGE) {
-				p.nextToken()
-				x := p.parseExpression(LOWEST)
-				if !p.expectPeek(lexer.TOKEN_LBRACE) {
-					return nil
-				}
-				rangeStmt := &RangeStmt{Token: token, X: x, Body: p.parseBlockStmt()}
-				if len(names) > 0 {
-					rangeStmt.Key = names[0]
-				}
-				if len(names) > 1 {
-					rangeStmt.Value = names[1]
-				}
-				return rangeStmt
+			p.disableStructLiteral = true
+			x := p.parseExpression(LOWEST)
+			p.disableStructLiteral = false
+			if !p.expectPeek(lexer.TOKEN_LBRACE) {
+				return nil
 			}
+			rangeStmt := &RangeStmt{Token: token, X: x, Body: p.parseBlockStmt()}
+			if len(names) > 0 {
+				rangeStmt.Key = names[0]
+			}
+			if len(names) > 1 {
+				rangeStmt.Value = names[1]
+			}
+			return rangeStmt
 		}
+		
+		// 不是 range 循环，可能是普通赋值作为 init 语句
+		// 回退处理（这是一个复杂情况，暂时简化处理）
 	}
 
 	// 普通 for 循环
@@ -1456,7 +1488,9 @@ func (p *Parser) parseForStmt() Statement {
 		p.nextToken()
 
 		if !p.curTokenIs(lexer.TOKEN_SEMICOLON) {
+			p.disableStructLiteral = true
 			forStmt.Condition = p.parseExpression(LOWEST)
+			p.disableStructLiteral = false
 		}
 
 		if !p.expectPeek(lexer.TOKEN_SEMICOLON) {
@@ -1465,7 +1499,9 @@ func (p *Parser) parseForStmt() Statement {
 		p.nextToken()
 
 		if !p.curTokenIs(lexer.TOKEN_LBRACE) {
+			p.disableStructLiteral = true
 			forStmt.Post = &ExpressionStmt{Expression: p.parseExpression(LOWEST)}
+			p.disableStructLiteral = false
 		}
 	} else {
 		// 只有条件的 for 循环
@@ -1486,14 +1522,19 @@ func (p *Parser) parseSwitchStmt() *SwitchStmt {
 	p.nextToken()
 
 	// 解析初始化和 tag
+	// 在 switch 语句中，{ 是语句块的开始，不应被解析为结构体字面量
 	if !p.curTokenIs(lexer.TOKEN_LBRACE) {
+		p.disableStructLiteral = true
 		expr := p.parseExpression(LOWEST)
+		p.disableStructLiteral = false
 		if p.peekTokenIs(lexer.TOKEN_SEMICOLON) {
 			stmt.Init = &ExpressionStmt{Expression: expr}
 			p.nextToken()
 			p.nextToken()
 			if !p.curTokenIs(lexer.TOKEN_LBRACE) {
+				p.disableStructLiteral = true
 				stmt.Tag = p.parseExpression(LOWEST)
+				p.disableStructLiteral = false
 			}
 		} else {
 			stmt.Tag = expr
@@ -1506,12 +1547,15 @@ func (p *Parser) parseSwitchStmt() *SwitchStmt {
 	p.nextToken()
 
 	// 解析 case 子句
+	// 注意：parseCaseClause 返回时 curToken 已经是下一个 case/default/}
 	for !p.curTokenIs(lexer.TOKEN_RBRACE) && !p.curTokenIs(lexer.TOKEN_EOF) {
 		clause := p.parseCaseClause()
 		if clause != nil {
 			stmt.Cases = append(stmt.Cases, clause)
+		} else {
+			// 如果解析失败，跳过当前 token 继续
+			p.nextToken()
 		}
-		p.nextToken()
 	}
 
 	return stmt
@@ -1936,6 +1980,7 @@ var precedences = map[lexer.TokenType]int{
 	lexer.TOKEN_LBRACKET:    INDEX,
 	lexer.TOKEN_DOT:          INDEX,
 	lexer.TOKEN_DOUBLE_COLON: INDEX,
+	lexer.TOKEN_ELLIPSIS:     INDEX, // 后缀 ... 用于展开参数
 }
 
 // peekPrecedence 获取下一个 token 的优先级
@@ -2042,19 +2087,27 @@ func (p *Parser) parseExpression(precedence int) Expression {
 		case lexer.TOKEN_DOUBLE_COLON:
 			p.nextToken()
 			left = p.parseStaticAccessExpression(left)
+		case lexer.TOKEN_ELLIPSIS:
+			// 后缀 ... 用于展开切片/变长参数，如 args...
+			p.nextToken()
+			left = &Ellipsis{Token: p.curToken, Elt: left}
 		default:
 			return left
 		}
 	}
 
 	// 检查结构体字面量（只在表达式末尾）
-	if p.peekTokenIs(lexer.TOKEN_LBRACE) {
-		if ident, ok := left.(*Identifier); ok {
-			// 检查是否是类型名（首字母大写或特定关键字）
-			if len(ident.Value) > 0 && (ident.Value[0] >= 'A' && ident.Value[0] <= 'Z') {
-				p.nextToken()
-				left = p.parseStructLiteral(left)
-			}
+	// tugo 使用 public/private 关键字标识可见性，不依赖首字母大小写
+	// 因此任何标识符后跟 { 都可能是结构体字面量
+	// 注意：在 switch/for 等语句中，{ 是语句块的开始，不应解析为结构体字面量
+	if p.peekTokenIs(lexer.TOKEN_LBRACE) && !p.disableStructLiteral {
+		if _, ok := left.(*Identifier); ok {
+			p.nextToken()
+			left = p.parseStructLiteral(left)
+		} else if _, ok := left.(*SelectorExpr); ok {
+			// 支持 pkg.Type{} 形式
+			p.nextToken()
+			left = p.parseStructLiteral(left)
 		}
 	}
 
@@ -2311,7 +2364,8 @@ func (p *Parser) parseSelectorExpression(left Expression) Expression {
 		return &TypeAssertExpr{Token: token, X: left, Type: typ}
 	}
 
-	if !p.curTokenIs(lexer.TOKEN_IDENT) {
+	// 允许标识符和某些内置函数关键字作为选择器
+	if !p.curTokenIs(lexer.TOKEN_IDENT) && !p.isBuiltinFuncToken() {
 		return nil
 	}
 
@@ -2557,6 +2611,7 @@ func (p *Parser) parseMakeExpression() Expression {
 // 1. Go 风格: new(Type)
 // 2. OOP 风格: new ClassName() 或 new ClassName(arg1, arg2)
 // 3. 泛型: new ClassName[T]() 或 new ClassName[T](arg1, arg2)
+// 4. 带包前缀: new pkg.ClassName() 或 new pkg.ClassName[T]()
 func (p *Parser) parseNewExpression() Expression {
 	expr := &NewExpr{Token: p.curToken}
 
@@ -2571,17 +2626,30 @@ func (p *Parser) parseNewExpression() Expression {
 			return nil
 		}
 	} else if p.peekTokenIs(lexer.TOKEN_IDENT) {
-		// OOP 风格: new ClassName(args) 或 new ClassName[T](args)
-		p.nextToken() // 消费 ClassName
-		ident := &Identifier{Token: p.curToken, Value: p.curToken.Literal}
+		// OOP 风格: new ClassName(args) 或 new pkg.ClassName(args)
+		p.nextToken() // 消费第一个标识符
+		var typeExpr Expression = &Identifier{Token: p.curToken, Value: p.curToken.Literal}
+
+		// 检查是否是 pkg.ClassName 形式
+		for p.peekTokenIs(lexer.TOKEN_DOT) {
+			p.nextToken() // 消费 .
+			p.nextToken() // 消费下一个标识符
+			if !p.curTokenIs(lexer.TOKEN_IDENT) {
+				break
+			}
+			typeExpr = &SelectorExpr{
+				X:   typeExpr,
+				Sel: p.curToken.Literal,
+			}
+		}
 
 		// 检查是否有泛型类型参数 [T, K, ...]
 		if p.peekTokenIs(lexer.TOKEN_LBRACKET) {
 			p.nextToken() // 消费 [
 			typeArgs := p.parseTypeArgs()
-			expr.Type = &GenericType{Token: ident.Token, Type: ident, TypeArgs: typeArgs}
+			expr.Type = &GenericType{Token: p.curToken, Type: typeExpr, TypeArgs: typeArgs}
 		} else {
-			expr.Type = ident
+			expr.Type = typeExpr
 		}
 
 		// 检查是否有参数列表
@@ -2759,16 +2827,30 @@ func (p *Parser) parseChanType() Expression {
 func (p *Parser) parseType() Expression {
 	switch p.curToken.Type {
 	case lexer.TOKEN_IDENT:
-		ident := &Identifier{Token: p.curToken, Value: p.curToken.Literal}
+		var result Expression = &Identifier{Token: p.curToken, Value: p.curToken.Literal}
+		
+		// 检查是否是 pkg.Type 形式的限定类型
+		for p.peekTokenIs(lexer.TOKEN_DOT) {
+			p.nextToken() // 跳过 .
+			p.nextToken() // 移动到下一个标识符
+			if !p.curTokenIs(lexer.TOKEN_IDENT) {
+				break
+			}
+			result = &SelectorExpr{
+				X:   result,
+				Sel: p.curToken.Literal,
+			}
+		}
+		
 		// 检查是否是泛型类型实例化 Type[T1, T2]
 		if p.peekTokenIs(lexer.TOKEN_LBRACKET) {
 			p.nextToken() // 移动到 [
 			args := p.parseTypeArgs()
 			if len(args) > 0 {
-				return &GenericType{Token: ident.Token, Type: ident, TypeArgs: args}
+				return &GenericType{Token: p.curToken, Type: result, TypeArgs: args}
 			}
 		}
-		return ident
+		return result
 	case lexer.TOKEN_ASTERISK:
 		token := p.curToken
 		p.nextToken()

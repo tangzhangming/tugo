@@ -1,0 +1,91 @@
+package db
+
+import (
+    "fmt"
+    "gorm.io/gorm"
+)
+
+// Model 模型基类
+// 所有 ORM 模型都应继承此类
+public class Model {
+    // 基础字段 - 子类可选择使用
+    #gorm:"primaryKey"
+    public ID uint
+    
+    public CreatedAt int64
+    public UpdatedAt int64
+    
+    // tableName 返回表名
+    // 子类重写此方法以指定自定义表名
+    public func tableName() string {
+        return ""
+    }
+    
+    // connectionName 返回连接名称
+    // 子类重写此方法以使用非默认连接
+    public func connectionName() string {
+        return "default"
+    }
+    
+    // getDBConn 获取当前模型使用的数据库连接
+    protected func getDBConn() *gorm.DB {
+        connName := this.connectionName()
+        db := DB::getInstance()
+        if db == nil {
+            return nil
+        }
+        conn := db.connection(connName)
+        if conn == nil {
+            conn = db.default_()
+        }
+        return conn
+    }
+    
+    // save 保存模型（创建或更新）
+    public func save()! {
+        db := this.getDBConn()
+        if db == nil {
+            throw fmt.Errorf("no database connection available")
+        }
+        err := db.Save(this).Error
+        if err != nil {
+            throw err
+        }
+    }
+    
+    // create 创建新记录
+    public func create()! {
+        db := this.getDBConn()
+        if db == nil {
+            throw fmt.Errorf("no database connection available")
+        }
+        err := db.Create(this).Error
+        if err != nil {
+            throw err
+        }
+    }
+    
+    // delete 删除记录
+    public func delete()! {
+        db := this.getDBConn()
+        if db == nil {
+            throw fmt.Errorf("no database connection available")
+        }
+        err := db.Delete(this).Error
+        if err != nil {
+            throw err
+        }
+    }
+    
+    // reload 重新从数据库加载
+    public func reload()! {
+        db := this.getDBConn()
+        if db == nil {
+            throw fmt.Errorf("no database connection available")
+        }
+        err := db.First(this, this.ID).Error
+        if err != nil {
+            throw err
+        }
+    }
+}

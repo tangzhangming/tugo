@@ -98,8 +98,26 @@ func transpileDir(inputDir, outputDir string, verbose bool, cfg *config.Config) 
 		return &noFilesError{dir: inputDir}
 	}
 
-	// 构建全局符号表
-	table := symbol.Collect(allFiles)
+	// 收集 tugo 标准库导入
+	tugoImports := collectTugoImports(allFiles)
+
+	// 预解析标准库文件，将类信息加载到全局符号表
+	var stdlibFiles []*parser.File
+	if len(tugoImports) > 0 {
+		stdlibDir, err := getStdlibDir()
+		if err == nil {
+			stdlibFiles = preloadStdlibClasses(stdlibDir, tugoImports, verbose)
+			if verbose {
+				printInfo(fmt.Sprintf("预加载了 %d 个标准库文件", len(stdlibFiles)))
+			}
+		} else if verbose {
+			printInfo(fmt.Sprintf("标准库目录不存在: %v", err))
+		}
+	}
+
+	// 构建全局符号表（包含用户代码和标准库）
+	allFilesWithStdlib := append(stdlibFiles, allFiles...)
+	table := symbol.Collect(allFilesWithStdlib)
 
 	// 第二遍：转译
 	t := transpiler.New(table)
@@ -155,9 +173,6 @@ func transpileDir(inputDir, outputDir string, verbose bool, cfg *config.Config) 
 		return err
 	}
 
-	// 收集 tugo 标准库导入
-	tugoImports := collectTugoImports(allFiles)
-
 	// 转译标准库到 vendor 目录
 	if len(tugoImports) > 0 {
 		stdlibDir, err := getStdlibDir()
@@ -174,7 +189,7 @@ func transpileDir(inputDir, outputDir string, verbose bool, cfg *config.Config) 
 
 	// 生成 go.mod 文件
 	goModPath := filepath.Join(outputDir, "go.mod")
-	goModContent := fmt.Sprintf("module %s\n\ngo 1.21\n", cfg.Project.Module)
+	goModContent := generateGoMod(cfg.Project.Module, tugoImports)
 	if err := os.WriteFile(goModPath, []byte(goModContent), 0644); err != nil {
 		return &goModError{err: err}
 	}
@@ -204,8 +219,21 @@ func transpileFile(inputFile, outputPath string, verbose bool, cfg *config.Confi
 		return &parseError{path: inputFile, msg: errors[0]}
 	}
 
-	// 构建符号表
-	table := symbol.Collect([]*parser.File{file})
+	// 收集 tugo 标准库导入
+	tugoImports := collectTugoImports([]*parser.File{file})
+
+	// 预解析标准库文件，将类信息加载到全局符号表
+	var stdlibFiles []*parser.File
+	if len(tugoImports) > 0 {
+		stdlibDir, err := getStdlibDir()
+		if err == nil {
+			stdlibFiles = preloadStdlibClasses(stdlibDir, tugoImports, verbose)
+		}
+	}
+
+	// 构建符号表（包含用户代码和标准库）
+	allFilesWithStdlib := append(stdlibFiles, file)
+	table := symbol.Collect(allFilesWithStdlib)
 
 	// 获取文件名（不含路径和后缀）用于入口类检测
 	baseName := filepath.Base(inputFile)
@@ -252,9 +280,6 @@ func transpileFile(inputFile, outputPath string, verbose bool, cfg *config.Confi
 		return &writeFileError{path: finalOutput, err: err}
 	}
 
-	// 收集 tugo 标准库导入
-	tugoImports := collectTugoImports([]*parser.File{file})
-
 	// 转译标准库到 vendor 目录
 	if len(tugoImports) > 0 {
 		stdlibDir, err := getStdlibDir()
@@ -271,7 +296,7 @@ func transpileFile(inputFile, outputPath string, verbose bool, cfg *config.Confi
 
 	// 生成 go.mod 文件
 	goModPath := filepath.Join(outputDir, "go.mod")
-	goModContent := fmt.Sprintf("module %s\n\ngo 1.21\n", cfg.Project.Module)
+	goModContent := generateGoMod(cfg.Project.Module, tugoImports)
 	if err := os.WriteFile(goModPath, []byte(goModContent), 0644); err != nil {
 		return &goModError{err: err}
 	}
@@ -351,4 +376,34 @@ type goModError struct {
 
 func (e *goModError) Error() string {
 	return fmt.Sprintf("%s: %v", i18n.T(i18n.ErrCannotWriteGoMod), e.err)
+}
+
+// generateGoMod 生成 go.mod 文件内容
+// 如果使用了 tugo.db，会自动添加 GORM 依赖
+func generateGoMod(module string, tugoImports map[string]bool) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("module %s\n\ngo 1.21\n", module))
+
+	// 检查是否使用了 tugo.db
+	if tugoImports["tugo.db"] {
+		sb.WriteString("\nrequire (\n")
+		sb.WriteString("\tgorm.io/gorm v1.25.12\n")
+		sb.WriteString("\tgorm.io/driver/mysql v1.5.7\n")
+		sb.WriteString("\tgorm.io/driver/postgres v1.5.11\n")
+		sb.WriteString("\tgorm.io/driver/sqlite v1.5.7\n")
+		sb.WriteString(")\n")
+	}
+
+	// 添加 replace 指令，将 tugo 包映射到本地目录
+	if len(tugoImports) > 0 {
+		sb.WriteString("\nreplace (\n")
+		for pkgPath := range tugoImports {
+			// tugo.db -> tugo/db
+			goPkgPath := strings.ReplaceAll(pkgPath, ".", "/")
+			sb.WriteString(fmt.Sprintf("\t%s => ./%s\n", goPkgPath, goPkgPath))
+		}
+		sb.WriteString(")\n")
+	}
+
+	return sb.String()
 }

@@ -1,0 +1,143 @@
+package db
+
+import (
+    "fmt"
+    "gorm.io/gorm"
+    "gorm.io/driver/mysql"
+    "gorm.io/driver/postgres"
+    "gorm.io/driver/sqlite"
+)
+
+// connectionConfig 数据库连接配置
+public struct connectionConfig {
+    public driver string      // mysql, postgres, sqlite
+    public host string        // 主机地址
+    public port int           // 端口
+    public database string    // 数据库名
+    public username string    // 用户名
+    public password string    // 密码
+    public charset string     // 字符集 (mysql)
+    public sslmode string     // SSL模式 (postgres)
+    public path string        // 文件路径 (sqlite)
+}
+
+// DB 数据库管理器
+// 管理多个数据库连接，支持连接切换
+public class DB {
+    // 静态成员 - 全局单例实例
+    private static instance *DB
+    
+    private connections map[string]*gorm.DB
+    private defaultName string
+    
+    public func init() {
+        this.connections = make(map[string]*gorm.DB)
+        this.defaultName = "default"
+    }
+    
+    // getInstance 获取全局 DB 实例（静态方法）
+    public static func getInstance() *DB {
+        if self::instance == nil {
+            self::instance = new DB()
+        }
+        return self::instance
+    }
+    
+    // setInstance 设置全局 DB 实例（静态方法）
+    public static func setInstance(db *DB) {
+        self::instance = db
+    }
+    
+    // addConnection 添加数据库连接
+    public func addConnection(name string, config connectionConfig)! {
+        var dsn string
+        var dialector gorm.Dialector
+        
+        switch config.driver {
+        case "mysql":
+            charset := config.charset
+            if charset == "" {
+                charset = "utf8mb4"
+            }
+            dsn = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=%s&parseTime=True&loc=Local",
+                config.username, config.password, config.host, config.port, config.database, charset)
+            dialector = mysql.Open(dsn)
+            
+        case "postgres":
+            sslmode := config.sslmode
+            if sslmode == "" {
+                sslmode = "disable"
+            }
+            dsn = fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%d sslmode=%s",
+                config.host, config.username, config.password, config.database, config.port, sslmode)
+            dialector = postgres.Open(dsn)
+            
+        case "sqlite":
+            dsn = config.path
+            if dsn == "" {
+                dsn = config.database
+            }
+            dialector = sqlite.Open(dsn)
+            
+        default:
+            throw fmt.Errorf("unsupported database driver: %s", config.driver)
+        }
+        
+        db, err := gorm.Open(dialector, &gorm.Config{})
+        if err != nil {
+            throw err
+        }
+        
+        this.connections[name] = db
+        
+        // 如果是第一个连接，设为默认
+        if len(this.connections) == 1 {
+            this.defaultName = name
+        }
+    }
+    
+    // connection 获取指定名称的连接
+    public func connection(name string) *gorm.DB {
+        return this.connections[name]
+    }
+    
+    // default_ 获取默认连接
+    public func default_() *gorm.DB {
+        return this.connections[this.defaultName]
+    }
+    
+    // setDefault 设置默认连接名称
+    public func setDefault(name string) {
+        this.defaultName = name
+    }
+    
+    // hasConnection 检查连接是否存在
+    public func hasConnection(name string) bool {
+        _, ok := this.connections[name]
+        return ok
+    }
+    
+    // close 关闭指定连接
+    public func close(name string)! {
+        db := this.connections[name]
+        if db == nil {
+            return
+        }
+        sqlDB, err := db.DB()
+        if err != nil {
+            throw err
+        }
+        err = sqlDB.Close()
+        if err != nil {
+            throw err
+        }
+        delete(this.connections, name)
+    }
+    
+    // closeAll 关闭所有连接
+    public func closeAll()! {
+        for name := range this.connections {
+            this.close(name)
+        }
+    }
+}

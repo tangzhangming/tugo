@@ -33,6 +33,7 @@ type CodeGen struct {
 	matchCounter       int                  // match 表达式计数器（用于生成唯一临时变量名）
 	pendingStatements  []string             // 需要在当前语句前插入的代码
 	currentFuncParams  map[string]bool      // 当前函数的参数名（用于标识符解析）
+	selfReplaceMode    bool                 // 是否处于 self 替换模式（用于虚方法包装）
 }
 
 // NewCodeGen 创建一个新的代码生成器
@@ -136,16 +137,200 @@ func (g *CodeGen) convertPkgPath(pkgPath string) string {
 	return strings.ReplaceAll(pkgPath, ".", "/")
 }
 
+// ========== Self 传递分析 ==========
+
+// needsSelfPass 分析方法是否需要 self 传递
+// 当方法体中 this 被作为参数传递给外部函数时，需要 self 传递
+func (g *CodeGen) needsSelfPass(method *parser.ClassMethod) bool {
+	if method.Body == nil {
+		return false
+	}
+	return g.analyzeBlockForThisPass(method.Body)
+}
+
+// analyzeBlockForThisPass 分析代码块中是否有 this 传递场景
+func (g *CodeGen) analyzeBlockForThisPass(block *parser.BlockStmt) bool {
+	for _, stmt := range block.Statements {
+		if g.analyzeStmtForThisPass(stmt) {
+			return true
+		}
+	}
+	return false
+}
+
+// analyzeStmtForThisPass 分析语句中是否有 this 传递场景
+func (g *CodeGen) analyzeStmtForThisPass(stmt parser.Statement) bool {
+	switch s := stmt.(type) {
+	case *parser.ExpressionStmt:
+		return g.analyzeExprForThisPass(s.Expression)
+	case *parser.ReturnStmt:
+		for _, v := range s.Values {
+			if g.analyzeExprForThisPass(v) {
+				return true
+			}
+		}
+	case *parser.AssignStmt:
+		for _, r := range s.Right {
+			if g.analyzeExprForThisPass(r) {
+				return true
+			}
+		}
+	case *parser.ShortVarDecl:
+		if g.analyzeExprForThisPass(s.Value) {
+			return true
+		}
+	case *parser.VarDecl:
+		if s.Value != nil && g.analyzeExprForThisPass(s.Value) {
+			return true
+		}
+	case *parser.IfStmt:
+		if s.Consequence != nil && g.analyzeBlockForThisPass(s.Consequence) {
+			return true
+		}
+		if alt, ok := s.Alternative.(*parser.BlockStmt); ok {
+			if g.analyzeBlockForThisPass(alt) {
+				return true
+			}
+		}
+		if alt, ok := s.Alternative.(*parser.IfStmt); ok {
+			if g.analyzeStmtForThisPass(alt) {
+				return true
+			}
+		}
+	case *parser.ForStmt:
+		if s.Body != nil && g.analyzeBlockForThisPass(s.Body) {
+			return true
+		}
+	case *parser.RangeStmt:
+		if s.Body != nil && g.analyzeBlockForThisPass(s.Body) {
+			return true
+		}
+	case *parser.SwitchStmt:
+		for _, c := range s.Cases {
+			for _, st := range c.Body {
+				if g.analyzeStmtForThisPass(st) {
+					return true
+				}
+			}
+		}
+	case *parser.BlockStmt:
+		return g.analyzeBlockForThisPass(s)
+	case *parser.TryStmt:
+		if s.Body != nil && g.analyzeBlockForThisPass(s.Body) {
+			return true
+		}
+		if s.Catch != nil && s.Catch.Body != nil && g.analyzeBlockForThisPass(s.Catch.Body) {
+			return true
+		}
+		if s.Finally != nil && g.analyzeBlockForThisPass(s.Finally) {
+			return true
+		}
+	case *parser.ThrowStmt:
+		if g.analyzeExprForThisPass(s.Value) {
+			return true
+		}
+	case *parser.GoStmt:
+		if s.Call != nil && g.analyzeExprForThisPass(s.Call) {
+			return true
+		}
+	case *parser.DeferStmt:
+		if s.Call != nil && g.analyzeExprForThisPass(s.Call) {
+			return true
+		}
+	}
+	return false
+}
+
+// analyzeExprForThisPass 分析表达式中是否有 this 传递场景
+func (g *CodeGen) analyzeExprForThisPass(expr parser.Expression) bool {
+	switch e := expr.(type) {
+	case *parser.CallExpr:
+		// 检查函数调用的参数中是否直接使用 this
+		for _, arg := range e.Arguments {
+			if g.isThisExpr(arg) {
+				return true
+			}
+			// 递归检查参数内部的调用
+			if g.analyzeExprForThisPass(arg) {
+				return true
+			}
+		}
+		// 递归检查函数表达式本身
+		if g.analyzeExprForThisPass(e.Function) {
+			return true
+		}
+	case *parser.BinaryExpr:
+		return g.analyzeExprForThisPass(e.Left) || g.analyzeExprForThisPass(e.Right)
+	case *parser.UnaryExpr:
+		return g.analyzeExprForThisPass(e.Operand)
+	case *parser.IndexExpr:
+		return g.analyzeExprForThisPass(e.X) || g.analyzeExprForThisPass(e.Index)
+	case *parser.SliceExpr:
+		if g.analyzeExprForThisPass(e.X) {
+			return true
+		}
+		if e.Low != nil && g.analyzeExprForThisPass(e.Low) {
+			return true
+		}
+		if e.High != nil && g.analyzeExprForThisPass(e.High) {
+			return true
+		}
+	case *parser.SelectorExpr:
+		return g.analyzeExprForThisPass(e.X)
+	case *parser.FuncLiteral:
+		if e.Body != nil && g.analyzeBlockForThisPass(e.Body) {
+			return true
+		}
+	case *parser.TernaryExpr:
+		return g.analyzeExprForThisPass(e.Condition) ||
+			g.analyzeExprForThisPass(e.TrueExpr) ||
+			g.analyzeExprForThisPass(e.FalseExpr)
+	case *parser.StructLiteral:
+		for _, f := range e.Fields {
+			if g.analyzeExprForThisPass(f.Value) {
+				return true
+			}
+		}
+	case *parser.ArrayLiteral:
+		for _, el := range e.Elements {
+			if g.analyzeExprForThisPass(el) {
+				return true
+			}
+		}
+	case *parser.SliceLiteral:
+		for _, el := range e.Elements {
+			if g.analyzeExprForThisPass(el) {
+				return true
+			}
+		}
+	case *parser.MapLiteral:
+		for _, p := range e.Pairs {
+			if g.analyzeExprForThisPass(p.Key) || g.analyzeExprForThisPass(p.Value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isThisExpr 检查表达式是否是 this
+func (g *CodeGen) isThisExpr(expr parser.Expression) bool {
+	_, ok := expr.(*parser.ThisExpr)
+	return ok
+}
+
+// ========== 预扫描 ==========
+
 // prescan 预扫描文件以确定需要哪些导入
 func (g *CodeGen) prescan(file *parser.File) {
 	for _, stmt := range file.Statements {
 		g.prescanStatement(stmt)
 
-		// 扫描类的方法，并添加 tugo/lang 导入（用于 ClassInfo）
+		// 扫描类的方法，并添加 tugo/runtime 导入（用于 ClassInfo）
 		if classDecl, ok := stmt.(*parser.ClassDecl); ok {
-			// 非静态类需要 ClassInfo，添加 tugo/lang 导入
+			// 非静态类需要 ClassInfo，添加 tugo/runtime 导入
 			if !classDecl.Static {
-				g.tugoImports["tugo/lang"] = "lang"
+				g.tugoImports["tugo/runtime"] = "runtime"
 			}
 			for _, method := range classDecl.Methods {
 				if method.Body != nil {
@@ -908,7 +1093,22 @@ func (g *CodeGen) generateStaticClassMethod(decl *parser.ClassDecl, className st
 	}
 
 	g.write(" ")
+	
+	// 设置当前类上下文，用于 self:: 翻译
+	savedReceiver := g.currentReceiver
+	savedClassDecl := g.currentClassDecl
+	savedStaticClass := g.currentStaticClass
+	
+	g.currentReceiver = className
+	g.currentClassDecl = decl
+	g.currentStaticClass = nil // 这不是纯静态类
+	
 	g.generateBlockStmt(method.Body)
+	
+	// 恢复上下文
+	g.currentReceiver = savedReceiver
+	g.currentClassDecl = savedClassDecl
+	g.currentStaticClass = savedStaticClass
 }
 
 func (g *CodeGen) generateNormalClass(decl *parser.ClassDecl, className string) {
@@ -1022,38 +1222,38 @@ func (g *CodeGen) generateNormalClass(decl *parser.ClassDecl, className string) 
 	g.currentClassDecl = nil
 }
 
-// generateClassInfo 生成类信息变量 _ClassName_classInfo
+// generateClassInfo 生成类信息变量 XClassName_ClassInfo（公开格式用于跨包访问）
 func (g *CodeGen) generateClassInfo(decl *parser.ClassDecl, className string) {
 	pkgName := g.transpiler.pkg
 	fullName := pkgName + "." + decl.Name
 
-	// 需要导入 tugo/lang 包
-	g.tugoImports["tugo/lang"] = "lang"
+	// 需要导入 tugo/runtime 包
+	g.tugoImports["tugo/runtime"] = "runtime"
 
-	// 生成类信息变量
-	infoVarName := fmt.Sprintf("_%s_classInfo", className)
+	// 生成类信息变量（使用公开格式用于跨包访问）
+	infoVarName := fmt.Sprintf("X%s_ClassInfo", className)
 
 	// 检查是否有父类
 	if decl.Extends != "" {
 		parentClassName := symbol.ToGoName(decl.Extends, true)
-		parentInfoVar := fmt.Sprintf("_%s_classInfo", parentClassName)
+		parentInfoVar := fmt.Sprintf("X%s_ClassInfo", parentClassName)
 		// 如果父类在其他包，需要加包前缀
 		if pkg, ok := g.typeToPackage[decl.Extends]; ok {
 			parentInfoVar = pkg + "." + parentInfoVar
 		}
-		g.writeLine(fmt.Sprintf("var %s = &lang.ClassInfo{Name: %q, Package: %q, FullName: %q, Parent: %s}",
+		g.writeLine(fmt.Sprintf("var %s = &runtime.ClassInfo{Name: %q, Package: %q, FullName: %q, Parent: %s}",
 			infoVarName, decl.Name, pkgName, fullName, parentInfoVar))
 	} else {
-		g.writeLine(fmt.Sprintf("var %s = &lang.ClassInfo{Name: %q, Package: %q, FullName: %q}",
+		g.writeLine(fmt.Sprintf("var %s = &runtime.ClassInfo{Name: %q, Package: %q, FullName: %q}",
 			infoVarName, decl.Name, pkgName, fullName))
 	}
 }
 
 // generateClassMethod_Class 生成 Class() 方法
 func (g *CodeGen) generateClassMethod_Class(decl *parser.ClassDecl, className string) {
-	infoVarName := fmt.Sprintf("_%s_classInfo", className)
+	infoVarName := fmt.Sprintf("X%s_ClassInfo", className)
 	typeParamsUse := g.getTypeParamsUse(decl.TypeParams)
-	g.writeLine(fmt.Sprintf("func (this *%s%s) Class() *lang.ClassInfo {", className, typeParamsUse))
+	g.writeLine(fmt.Sprintf("func (this *%s%s) Class() *runtime.ClassInfo {", className, typeParamsUse))
 	g.indent++
 	g.writeLine(fmt.Sprintf("return %s", infoVarName))
 	g.indent--
@@ -1131,6 +1331,27 @@ func (g *CodeGen) generateChildClass(decl *parser.ClassDecl, className string) {
 
 	// 获取父类信息
 	parentInfo := g.transpiler.table.GetClass(g.transpiler.pkg, decl.Extends)
+	
+	// 检查父类是否来自外部包（通过 use 导入）
+	isExternalParent := parentInfo == nil
+	var externalParentPkg string
+	if isExternalParent {
+		// 查找 use 导入的包路径
+		if g.transpiler.currentParsedFile != nil {
+			for _, importDecl := range g.transpiler.currentParsedFile.Imports {
+				for _, spec := range importDecl.Specs {
+					if spec.IsGoImport {
+						continue
+					}
+					if spec.TypeName == decl.Extends {
+						// use "tugo.db.model" -> db 包中的 Model
+						externalParentPkg = g.getPackageAliasFromUsePath(spec.Path)
+						break
+					}
+				}
+			}
+		}
+	}
 
 	// 1. 生成静态字段（包级变量）
 	for _, field := range decl.Fields {
@@ -1153,10 +1374,19 @@ func (g *CodeGen) generateChildClass(decl *parser.ClassDecl, className string) {
 	g.writeLine(fmt.Sprintf("type %s struct {", className))
 	g.indent++
 
-	// 如果父类是抽象类，嵌入基础结构体
-	if parentInfo != nil && parentInfo.Abstract {
+	// 处理父类嵌入
+	if isExternalParent {
+		// 外部包的父类：嵌入指针
+		if externalParentPkg != "" {
+			g.writeLine("*" + externalParentPkg + "." + parentName)
+		} else {
+			g.writeLine("*" + parentName)
+		}
+	} else if parentInfo != nil && parentInfo.Abstract {
+		// 抽象类：嵌入基础结构体
 		g.writeLine(parentBaseName)
 	} else {
+		// 普通类：嵌入指针
 		g.writeLine("*" + parentName)
 	}
 
@@ -1187,9 +1417,237 @@ func (g *CodeGen) generateChildClass(decl *parser.ClassDecl, className string) {
 		g.writeLine("")
 	}
 
-	// 4.5 生成 Class() 方法
+	// 4.5 生成继承的需要 self 传递的方法的包装版本
+	g.generateInheritedMethodWrappers(decl, className, parentInfo, externalParentPkg, isExternalParent)
+
+	// 4.6 生成 Class() 方法
 	g.generateClassMethod_Class(decl, className)
 	g.writeLine("")
+}
+
+// InheritedMethodInfo 继承方法信息
+type InheritedMethodInfo struct {
+	Method      *parser.ClassMethod
+	AccessPath  string // 访问路径，如 "User.Model" 或 "db.Model"
+	ImplClass   string // 实现类名
+	ImplPkg     string // 实现类所在包（如果是外部包）
+	IsExternal  bool   // 是否是外部包的类
+}
+
+// generateInheritedMethodWrappers 生成继承的需要 self 传递的方法的包装版本
+func (g *CodeGen) generateInheritedMethodWrappers(decl *parser.ClassDecl, className string, parentInfo *symbol.ClassInfo, externalParentPkg string, isExternalParent bool) {
+	// 收集子类已重写的方法名
+	overriddenMethods := make(map[string]bool)
+	for _, method := range decl.Methods {
+		overriddenMethods[method.Name] = true
+	}
+
+	// 收集整个继承链上需要 self 传递的方法
+	methodsToWrap := g.collectInheritedSelfMethods(decl, overriddenMethods)
+
+	// 生成包装方法
+	for _, info := range methodsToWrap {
+		g.generateInheritedMethodWrapperWithPath(decl, className, info)
+		g.writeLine("")
+	}
+}
+
+// collectInheritedSelfMethods 收集继承链上所有需要 self 传递的方法
+func (g *CodeGen) collectInheritedSelfMethods(decl *parser.ClassDecl, overriddenMethods map[string]bool) []*InheritedMethodInfo {
+	var result []*InheritedMethodInfo
+	seenMethods := make(map[string]bool)
+
+	// 递归遍历继承链
+	g.collectFromAncestors(decl.Extends, "", overriddenMethods, seenMethods, &result)
+
+	return result
+}
+
+// collectFromAncestors 从祖先类收集方法
+func (g *CodeGen) collectFromAncestors(className, accessPath string, overriddenMethods, seenMethods map[string]bool, result *[]*InheritedMethodInfo) {
+	if className == "" {
+		return
+	}
+
+	// 尝试在当前包查找类
+	classInfo := g.transpiler.table.GetClass(g.transpiler.pkg, className)
+	var isExternal bool
+	var externalPkg string
+
+	if classInfo == nil {
+		// 尝试从 use 导入中查找
+		if g.transpiler.currentParsedFile != nil {
+			for _, importDecl := range g.transpiler.currentParsedFile.Imports {
+				for _, spec := range importDecl.Specs {
+					if spec.IsGoImport {
+						continue
+					}
+					if spec.TypeName == className {
+						externalPkg = g.getPackageAliasFromUsePath(spec.Path)
+						classInfo = g.transpiler.GetExternalClass(externalPkg, className)
+						isExternal = true
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if classInfo == nil {
+		return
+	}
+
+	// 构建当前类的访问路径
+	var currentPath string
+	goClassName := symbol.ToGoName(className, true)
+	if classInfo.Abstract {
+		goClassName = symbol.ToGoName(className, false) + "Base"
+	}
+
+	// 构建访问路径 - 注意：Go 嵌入字段访问不需要包名前缀
+	// 例如 User 嵌入 *db.Model 时，访问 Model 的方法只需 t.Model.Method()
+	if accessPath == "" {
+		currentPath = goClassName
+	} else {
+		currentPath = accessPath + "." + goClassName
+	}
+
+	// 收集当前类的方法
+	for _, method := range classInfo.Methods {
+		// 跳过已重写的方法
+		if overriddenMethods[method.Name] {
+			continue
+		}
+		// 跳过已处理的方法（避免重复）
+		if seenMethods[method.Name] {
+			continue
+		}
+		// 跳过私有方法
+		if method.Visibility == "private" {
+			continue
+		}
+		// 跳过静态方法
+		if method.Static {
+			continue
+		}
+		// 检查是否需要 self 传递
+		if g.needsSelfPass(method) {
+			*result = append(*result, &InheritedMethodInfo{
+				Method:     method,
+				AccessPath: currentPath,
+				ImplClass:  className,
+				ImplPkg:    externalPkg,
+				IsExternal: isExternal,
+			})
+			seenMethods[method.Name] = true
+		}
+	}
+
+	// 递归检查父类
+	if classInfo.Extends != "" {
+		g.collectFromAncestors(classInfo.Extends, currentPath, overriddenMethods, seenMethods, result)
+	}
+}
+
+// generateInheritedMethodWrapperWithPath 生成带完整路径的继承方法包装
+func (g *CodeGen) generateInheritedMethodWrapperWithPath(decl *parser.ClassDecl, className string, info *InheritedMethodInfo) {
+	method := info.Method
+	isPublic := method.Visibility == "public" || method.Visibility == "protected"
+	methodName := symbol.ToGoName(method.Name, isPublic)
+
+	// impl 方法名（使用公开格式用于跨包访问）
+	implMethodName := methodName + "__Impl"
+
+	// 获取接收者名称
+	receiverName := getReceiverName(method.Params, "t")
+
+	// 检查是否有默认参数
+	hasDefault := false
+	for _, param := range method.Params {
+		if param.DefaultValue != nil {
+			hasDefault = true
+			break
+		}
+	}
+
+	if hasDefault {
+		// 带默认参数的包装方法
+		implClassName := symbol.ToGoName(info.ImplClass, true)
+		optsName := fmt.Sprintf("%s__%s__Opts", implClassName, methodName)
+		if info.IsExternal && info.ImplPkg != "" {
+			optsName = info.ImplPkg + "." + optsName
+		}
+
+		g.writeIndent()
+		g.write(fmt.Sprintf("func (%s *%s) %s(opts %s)", receiverName, className, methodName, optsName))
+		g.generateMethodReturnSignature(method)
+		g.writeLine(" {")
+		g.indent++
+
+		// 调用父类的 impl 版本
+		g.writeIndent()
+		if len(method.Results) > 0 || method.Errable {
+			g.write("return ")
+		}
+		g.write(fmt.Sprintf("%s.%s.%s(%s, opts)", receiverName, info.AccessPath, implMethodName, receiverName))
+		g.writeLine("")
+
+		g.indent--
+		g.writeLine("}")
+	} else {
+		// 简单包装方法
+		g.writeIndent()
+		g.write(fmt.Sprintf("func (%s *%s) %s(", receiverName, className, methodName))
+
+		// 参数
+		for i, param := range method.Params {
+			if i > 0 {
+				g.write(", ")
+			}
+			g.write(symbol.TransformDollarVar(param.Name))
+			g.write(" ")
+			g.write(g.generateType(param.Type))
+		}
+		g.write(")")
+
+		// 返回值
+		g.generateMethodReturnSignature(method)
+
+		g.writeLine(" {")
+		g.indent++
+
+		// 调用祖先类的 impl 版本，传递子类实例作为 _self
+		g.writeIndent()
+		if len(method.Results) > 0 || method.Errable {
+			g.write("return ")
+		}
+		g.write(fmt.Sprintf("%s.%s.%s(%s", receiverName, info.AccessPath, implMethodName, receiverName))
+
+		// 传递其他参数
+		for _, param := range method.Params {
+			g.write(", ")
+			g.write(symbol.TransformDollarVar(param.Name))
+		}
+		g.writeLine(")")
+
+		g.indent--
+		g.writeLine("}")
+	}
+}
+
+// getPackageAliasFromUsePath 从 use 路径获取包别名
+// 例如 "tugo.db.model" -> "db", "tugo.db.DB" -> "db"
+func (g *CodeGen) getPackageAliasFromUsePath(usePath string) string {
+	// 解析 use 路径: tugo.db.model -> 包是 db, 类型是 model
+	parts := strings.Split(usePath, ".")
+	if len(parts) >= 2 {
+		// tugo.db.model -> db 是包名
+		pkgPart := parts[len(parts)-2]
+		// 确保 tugo 包被导入
+		g.tugoImports["tugo/"+pkgPart] = pkgPart
+		return pkgPart
+	}
+	return ""
 }
 
 // generateChildClassConstructor 生成子类构造函数
@@ -1600,6 +2058,9 @@ func (g *CodeGen) generateClassMethod(decl *parser.ClassDecl, className string, 
 	// 获取类型参数使用字符串（用于接收者类型）
 	typeParamsUse := g.getTypeParamsUse(decl.TypeParams)
 
+	// 检查是否需要 self 传递（方法体中 this 被传递给外部函数）
+	needsSelf := g.needsSelfPass(method)
+
 	// 检查是否有默认参数
 	hasDefault := false
 	for _, param := range method.Params {
@@ -1609,10 +2070,24 @@ func (g *CodeGen) generateClassMethod(decl *parser.ClassDecl, className string, 
 		}
 	}
 
-	if hasDefault {
-		g.generateClassMethodWithDefaults(className+typeParamsUse, methodName, method)
+	if needsSelf {
+		// 生成双版本方法：_impl 版本 + 公开包装版本
+		if hasDefault {
+			g.generateClassMethodImplWithDefaults(className+typeParamsUse, methodName, method)
+			g.writeLine("")
+			g.generateClassMethodWrapperWithDefaults(className+typeParamsUse, methodName, method)
+		} else {
+			g.generateClassMethodImpl(className+typeParamsUse, methodName, method)
+			g.writeLine("")
+			g.generateClassMethodWrapper(className+typeParamsUse, methodName, method)
+		}
 	} else {
-		g.generateClassMethodSimple(className+typeParamsUse, methodName, method)
+		// 普通生成
+		if hasDefault {
+			g.generateClassMethodWithDefaults(className+typeParamsUse, methodName, method)
+		} else {
+			g.generateClassMethodSimple(className+typeParamsUse, methodName, method)
+		}
 	}
 }
 
@@ -1646,6 +2121,317 @@ func getReceiverName(params []*parser.Field, defaultName string) string {
 		}
 	}
 }
+
+// ========== Self 传递方法生成 ==========
+
+// generateClassMethodImpl 生成需要 self 传递的方法的内部实现版本
+// 生成: func (t *Class) MethodName__Impl(_self interface{}) returnType
+func (g *CodeGen) generateClassMethodImpl(className, methodName string, method *parser.ClassMethod) {
+	// 获取原始类名（用于重载查找）
+	originalClassName := g.getOriginalClassName(className)
+
+	// 检查是否是重载方法，使用修饰后的名称
+	actualMethodName := methodName
+	if g.transpiler.table.IsMethodOverloaded(g.transpiler.pkg, originalClassName, method.Name) {
+		isPublic := method.Visibility == "public" || method.Visibility == "protected"
+		actualMethodName = symbol.GenerateMangledName(method.Name, method.Params, isPublic)
+	}
+
+	// impl 方法名（使用公开格式用于跨包访问）
+	implMethodName := actualMethodName + "__Impl"
+
+	// 获取接收者名称（避免和参数名冲突，也要避免和 _self 冲突）
+	receiverName := getReceiverName(method.Params, "t")
+	if receiverName == "_self" {
+		receiverName = "_recv"
+	}
+
+	g.writeIndent()
+	g.write(fmt.Sprintf("func (%s *%s) %s(_self interface{}", receiverName, className, implMethodName))
+
+	// 原有参数
+	for _, param := range method.Params {
+		g.write(", ")
+		g.write(symbol.TransformDollarVar(param.Name))
+		g.write(" ")
+		g.write(g.generateType(param.Type))
+	}
+	g.write(")")
+
+	// 返回值
+	g.generateMethodReturnSignature(method)
+
+	g.writeLine(" {")
+	g.indent++
+
+	// 方法体 - 使用 _self 替换 this 的传递场景
+	if method.Body != nil {
+		g.currentReceiver = receiverName
+		g.currentFuncErrable = method.Errable
+		g.currentFuncResults = method.Results
+		// 设置当前函数参数名
+		g.currentFuncParams = make(map[string]bool)
+		g.currentFuncParams["_self"] = true
+		for _, param := range method.Params {
+			g.currentFuncParams[param.Name] = true
+		}
+
+		// 启用 self 替换模式
+		g.selfReplaceMode = true
+		for _, stmt := range method.Body.Statements {
+			g.generateStatement(stmt)
+		}
+		g.selfReplaceMode = false
+
+		// 对于 errable 方法，如果最后一条语句不是 return/throw，添加 return nil
+		if method.Errable && !g.lastStmtIsReturnOrThrow(method.Body.Statements) {
+			g.writeLine("return nil")
+		}
+
+		g.currentReceiver = ""
+		g.currentFuncErrable = false
+		g.currentFuncResults = nil
+		g.currentFuncParams = nil
+	}
+
+	g.indent--
+	g.writeLine("}")
+}
+
+// generateClassMethodWrapper 生成需要 self 传递的方法的公开包装版本
+// 生成: func (t *Class) MethodName(params) returnType { return t.MethodName__Impl(t, params) }
+func (g *CodeGen) generateClassMethodWrapper(className, methodName string, method *parser.ClassMethod) {
+	// 获取原始类名（用于重载查找）
+	originalClassName := g.getOriginalClassName(className)
+
+	// 检查是否是重载方法，使用修饰后的名称
+	actualMethodName := methodName
+	if g.transpiler.table.IsMethodOverloaded(g.transpiler.pkg, originalClassName, method.Name) {
+		isPublic := method.Visibility == "public" || method.Visibility == "protected"
+		actualMethodName = symbol.GenerateMangledName(method.Name, method.Params, isPublic)
+	}
+
+	// impl 方法名（使用公开格式用于跨包访问）
+	implMethodName := actualMethodName + "__Impl"
+
+	// 获取接收者名称
+	receiverName := getReceiverName(method.Params, "t")
+
+	g.writeIndent()
+	g.write(fmt.Sprintf("func (%s *%s) %s(", receiverName, className, actualMethodName))
+
+	// 参数
+	for i, param := range method.Params {
+		if i > 0 {
+			g.write(", ")
+		}
+		g.write(symbol.TransformDollarVar(param.Name))
+		g.write(" ")
+		g.write(g.generateType(param.Type))
+	}
+	g.write(")")
+
+	// 返回值
+	g.generateMethodReturnSignature(method)
+
+	g.writeLine(" {")
+	g.indent++
+
+	// 调用 impl 版本，传递 t 作为 _self
+	g.writeIndent()
+	if len(method.Results) > 0 || method.Errable {
+		g.write("return ")
+	}
+	g.write(fmt.Sprintf("%s.%s(%s", receiverName, implMethodName, receiverName))
+
+	// 传递其他参数
+	for _, param := range method.Params {
+		g.write(", ")
+		g.write(symbol.TransformDollarVar(param.Name))
+	}
+	g.writeLine(")")
+
+	g.indent--
+	g.writeLine("}")
+}
+
+// generateClassMethodImplWithDefaults 生成带默认参数的 impl 方法
+func (g *CodeGen) generateClassMethodImplWithDefaults(className, methodName string, method *parser.ClassMethod) {
+	// 获取原始类名（用于重载查找）
+	originalClassName := g.getOriginalClassName(className)
+
+	// 检查是否是重载方法，使用修饰后的名称
+	actualMethodName := methodName
+	if g.transpiler.table.IsMethodOverloaded(g.transpiler.pkg, originalClassName, method.Name) {
+		isPublic := method.Visibility == "public" || method.Visibility == "protected"
+		actualMethodName = symbol.GenerateMangledName(method.Name, method.Params, isPublic)
+	}
+
+	// impl 方法名（使用公开格式用于跨包访问）
+	implMethodName := actualMethodName + "__Impl"
+	optsName := fmt.Sprintf("%s__%s__Opts", className, actualMethodName)
+
+	// 获取接收者名称
+	receiverName := getReceiverName(method.Params, "t")
+	if receiverName == "_self" {
+		receiverName = "_recv"
+	}
+
+	// 生成 Opts 结构体（复用现有逻辑）
+	g.writeLine(fmt.Sprintf("type %s struct {", optsName))
+	g.indent++
+	for _, param := range method.Params {
+		fieldName := symbol.ToGoName(param.Name, true)
+		typeName := g.generateType(param.Type)
+		g.writeLine(fmt.Sprintf("%s %s", fieldName, typeName))
+	}
+	g.indent--
+	g.writeLine("}")
+	g.writeLine("")
+
+	// 生成默认值构造器
+	g.writeLine(fmt.Sprintf("func NewDefault__%s() %s {", optsName, optsName))
+	g.indent++
+	var defaultFields []string
+	for _, param := range method.Params {
+		if param.DefaultValue != nil {
+			fieldName := symbol.ToGoName(param.Name, true)
+			defaultVal := g.generateExpression(param.DefaultValue)
+			defaultFields = append(defaultFields, fmt.Sprintf("%s: %s", fieldName, defaultVal))
+		}
+	}
+	g.writeLine(fmt.Sprintf("return %s{%s}", optsName, strings.Join(defaultFields, ", ")))
+	g.indent--
+	g.writeLine("}")
+	g.writeLine("")
+
+	// 生成 impl 方法
+	g.writeIndent()
+	g.write(fmt.Sprintf("func (%s *%s) %s(_self interface{}, opts %s)", receiverName, className, implMethodName, optsName))
+
+	// 返回值
+	g.generateMethodReturnSignature(method)
+
+	g.writeLine(" {")
+	g.indent++
+
+	// 从 opts 获取参数
+	for _, param := range method.Params {
+		varName := symbol.TransformDollarVar(param.Name)
+		fieldName := symbol.ToGoName(param.Name, true)
+		g.writeLine(fmt.Sprintf("%s := opts.%s", varName, fieldName))
+	}
+
+	// 方法体
+	if method.Body != nil {
+		g.currentReceiver = receiverName
+		g.currentFuncErrable = method.Errable
+		g.currentFuncResults = method.Results
+		g.currentFuncParams = make(map[string]bool)
+		g.currentFuncParams["_self"] = true
+		for _, param := range method.Params {
+			g.currentFuncParams[param.Name] = true
+		}
+
+		g.selfReplaceMode = true
+		for _, stmt := range method.Body.Statements {
+			g.generateStatement(stmt)
+		}
+		g.selfReplaceMode = false
+
+		if method.Errable && !g.lastStmtIsReturnOrThrow(method.Body.Statements) {
+			g.writeLine("return nil")
+		}
+
+		g.currentReceiver = ""
+		g.currentFuncErrable = false
+		g.currentFuncResults = nil
+		g.currentFuncParams = nil
+	}
+
+	g.indent--
+	g.writeLine("}")
+}
+
+// generateClassMethodWrapperWithDefaults 生成带默认参数的包装方法
+func (g *CodeGen) generateClassMethodWrapperWithDefaults(className, methodName string, method *parser.ClassMethod) {
+	// 获取原始类名（用于重载查找）
+	originalClassName := g.getOriginalClassName(className)
+
+	// 检查是否是重载方法，使用修饰后的名称
+	actualMethodName := methodName
+	if g.transpiler.table.IsMethodOverloaded(g.transpiler.pkg, originalClassName, method.Name) {
+		isPublic := method.Visibility == "public" || method.Visibility == "protected"
+		actualMethodName = symbol.GenerateMangledName(method.Name, method.Params, isPublic)
+	}
+
+	// impl 方法名（使用公开格式用于跨包访问）
+	implMethodName := actualMethodName + "__Impl"
+	optsName := fmt.Sprintf("%s__%s__Opts", className, actualMethodName)
+
+	// 获取接收者名称
+	receiverName := getReceiverName(method.Params, "t")
+
+	g.writeIndent()
+	g.write(fmt.Sprintf("func (%s *%s) %s(opts %s)", receiverName, className, actualMethodName, optsName))
+
+	// 返回值
+	g.generateMethodReturnSignature(method)
+
+	g.writeLine(" {")
+	g.indent++
+
+	// 调用 impl 版本
+	g.writeIndent()
+	if len(method.Results) > 0 || method.Errable {
+		g.write("return ")
+	}
+	g.write(fmt.Sprintf("%s.%s(%s, opts)", receiverName, implMethodName, receiverName))
+	g.writeLine("")
+
+	g.indent--
+	g.writeLine("}")
+}
+
+// generateMethodReturnSignature 生成方法返回值签名
+func (g *CodeGen) generateMethodReturnSignature(method *parser.ClassMethod) {
+	if len(method.Results) > 0 {
+		g.write(" ")
+		if method.Errable {
+			g.write("(")
+			for i, r := range method.Results {
+				if i > 0 {
+					g.write(", ")
+				}
+				if r.Name != "" {
+					g.write(symbol.TransformDollarVar(r.Name))
+					g.write(" ")
+				}
+				g.write(g.generateType(r.Type))
+			}
+			g.write(", error)")
+		} else if len(method.Results) == 1 && method.Results[0].Name == "" {
+			g.write(g.generateType(method.Results[0].Type))
+		} else {
+			g.write("(")
+			for i, r := range method.Results {
+				if i > 0 {
+					g.write(", ")
+				}
+				if r.Name != "" {
+					g.write(symbol.TransformDollarVar(r.Name))
+					g.write(" ")
+				}
+				g.write(g.generateType(r.Type))
+			}
+			g.write(")")
+		}
+	} else if method.Errable {
+		g.write(" error")
+	}
+}
+
+// ========== 普通方法生成 ==========
 
 // generateClassMethodSimple 生成简单方法
 func (g *CodeGen) generateClassMethodSimple(className, methodName string, method *parser.ClassMethod) {
@@ -1730,6 +2516,12 @@ func (g *CodeGen) generateClassMethodSimple(className, methodName string, method
 		for _, stmt := range method.Body.Statements {
 			g.generateStatement(stmt)
 		}
+		
+		// 对于 errable 方法，如果最后一条语句不是 return/throw，添加 return nil
+		if method.Errable && !g.lastStmtIsReturnOrThrow(method.Body.Statements) {
+			g.writeLine("return nil")
+		}
+		
 		g.currentReceiver = ""
 		g.currentFuncErrable = false
 		g.currentFuncResults = nil
@@ -1851,6 +2643,12 @@ func (g *CodeGen) generateClassMethodWithDefaults(className, methodName string, 
 		for _, stmt := range method.Body.Statements {
 			g.generateStatement(stmt)
 		}
+		
+		// 对于 errable 方法，如果最后一条语句不是 return/throw，添加 return nil
+		if method.Errable && !g.lastStmtIsReturnOrThrow(method.Body.Statements) {
+			g.writeLine("return nil")
+		}
+		
 		g.currentReceiver = ""
 		g.currentFuncErrable = false
 		g.currentFuncResults = nil
@@ -2113,6 +2911,34 @@ func (g *CodeGen) generateThrowStmt(stmt *parser.ThrowStmt) {
 	// 简化处理：假设当前在 errable 函数中
 	// 生成零值（可以根据实际返回类型优化）
 	g.writeLine("return " + g.generateZeroValues() + errorExpr)
+}
+
+// lastStmtIsReturnOrThrow 检查语句列表的最后一条语句是否是 return 或 throw
+func (g *CodeGen) lastStmtIsReturnOrThrow(stmts []parser.Statement) bool {
+	if len(stmts) == 0 {
+		return false
+	}
+	lastStmt := stmts[len(stmts)-1]
+	switch s := lastStmt.(type) {
+	case *parser.ReturnStmt:
+		return true
+	case *parser.ThrowStmt:
+		return true
+	case *parser.IfStmt:
+		// 检查if和else分支是否都以return/throw结束
+		if s.Consequence != nil && g.lastStmtIsReturnOrThrow(s.Consequence.Statements) {
+			if s.Alternative != nil {
+				if alt, ok := s.Alternative.(*parser.BlockStmt); ok {
+					return g.lastStmtIsReturnOrThrow(alt.Statements)
+				}
+				if alt, ok := s.Alternative.(*parser.IfStmt); ok {
+					return g.lastStmtIsReturnOrThrow([]parser.Statement{alt})
+				}
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // generateZeroValues 生成零值列表（用于 throw）
@@ -3117,6 +3943,18 @@ func (g *CodeGen) generateExpression(expr parser.Expression) string {
 	case *parser.StructType:
 		return g.generateStructType(e)
 	case *parser.Ellipsis:
+		// 区分类型定义 (...T) 和表达式展开 (args...)
+		// 如果 Elt 是标识符且不是类型关键字，则是表达式展开
+		if ident, ok := e.Elt.(*parser.Identifier); ok {
+			// 检查是否是变量名（表达式展开）而不是类型名
+			// 简单处理：检查是否是小写开头（变量）或者在当前变量表中
+			name := ident.Value
+			if name != "any" && name != "error" && name != "string" && name != "int" && name != "bool" && name != "byte" && name != "rune" && name != "float32" && name != "float64" {
+				// 可能是变量展开
+				return g.generateExpression(e.Elt) + "..."
+			}
+		}
+		// 否则是类型定义
 		return "..." + g.generateType(e.Elt)
 	case *parser.GenericType:
 		return g.generateGenericType(e)
@@ -3147,7 +3985,9 @@ func (g *CodeGen) generateIdentifier(ident *parser.Identifier) string {
 
 	// 检查是否是导入的类型名
 	if pkgName, ok := g.typeToPackage[name]; ok {
-		return pkgName + "." + name
+		// 对于导入的公开类型，需要使用 Go 的大写开头格式
+		goTypeName := symbol.ToGoName(name, true)
+		return pkgName + "." + goTypeName
 	}
 
 	// 查找符号表
@@ -3327,14 +4167,14 @@ func (g *CodeGen) generateCallExpr(expr *parser.CallExpr) string {
 			g.transpiler.needFmt = true
 			var argStrs []string
 			for _, arg := range expr.Arguments {
-				argStrs = append(argStrs, g.generateExpression(arg))
+				argStrs = append(argStrs, g.generateArgumentExpr(arg))
 			}
 			return "fmt.Errorf(" + strings.Join(argStrs, ", ") + ")"
 		// Go 内置函数，保持小写
 		case "make", "new", "len", "cap", "append", "copy", "delete", "close", "panic", "recover", "complex", "real", "imag":
 			var argStrs []string
 			for _, arg := range expr.Arguments {
-				argStrs = append(argStrs, g.generateExpression(arg))
+				argStrs = append(argStrs, g.generateArgumentExpr(arg))
 			}
 			return ident.Value + "(" + strings.Join(argStrs, ", ") + ")"
 		}
@@ -3370,7 +4210,7 @@ func (g *CodeGen) generateCallExpr(expr *parser.CallExpr) string {
 				
 				var args []string
 				for _, arg := range expr.Arguments {
-					args = append(args, g.generateExpression(arg))
+					args = append(args, g.generateArgumentExpr(arg))
 				}
 				return x + "." + mangledName + "(" + strings.Join(args, ", ") + ")"
 			}
@@ -3380,9 +4220,20 @@ func (g *CodeGen) generateCallExpr(expr *parser.CallExpr) string {
 	funcExpr := g.generateExpression(expr.Function)
 	var args []string
 	for _, arg := range expr.Arguments {
-		args = append(args, g.generateExpression(arg))
+		args = append(args, g.generateArgumentExpr(arg))
 	}
 	return funcExpr + "(" + strings.Join(args, ", ") + ")"
+}
+
+// generateArgumentExpr 生成函数调用参数表达式
+// 在 selfReplaceMode 下，this 被替换为 _self
+func (g *CodeGen) generateArgumentExpr(arg parser.Expression) string {
+	if g.selfReplaceMode {
+		if _, ok := arg.(*parser.ThisExpr); ok {
+			return "_self"
+		}
+	}
+	return g.generateExpression(arg)
 }
 
 // getOriginalClassName 获取原始类名（Go名称 -> Tugo名称）
@@ -3614,9 +4465,14 @@ func (g *CodeGen) generateStaticAccessExpr(expr *parser.StaticAccessExpr) string
 	// 获取类名和类声明
 	switch left := expr.Left.(type) {
 	case *parser.SelfExpr:
-		// self:: 使用当前静态类
+		// self:: 使用当前静态类或当前普通类
 		className = g.currentReceiver
-		classDecl = g.currentStaticClass
+		if g.currentStaticClass != nil {
+			classDecl = g.currentStaticClass
+		} else if g.currentClassDecl != nil {
+			// 普通类中的静态成员访问
+			classDecl = g.currentClassDecl
+		}
 	case *parser.Identifier:
 		// ClassName:: 直接使用类名
 		className = left.Value
@@ -3641,13 +4497,13 @@ func (g *CodeGen) generateStaticAccessExpr(expr *parser.StaticAccessExpr) string
 
 	// 特殊处理: ClassName::class 返回类信息
 	if memberName == "class" {
-		// 需要导入 tugo/lang 包
-		g.tugoImports["tugo/lang"] = "lang"
-		infoVarName := fmt.Sprintf("_%s_classInfo", goClassName)
+		// 需要导入 tugo/runtime 包
+		g.tugoImports["tugo/runtime"] = "runtime"
+		infoVarName := fmt.Sprintf("X%s_ClassInfo", goClassName)
 		return pkgPrefix + infoVarName
 	}
 
-	// 在静态类中查找成员
+	// 在类中查找成员
 	if classDecl != nil {
 		// 检查是否是字段
 		for _, field := range classDecl.Fields {
@@ -3656,7 +4512,8 @@ func (g *CodeGen) generateStaticAccessExpr(expr *parser.StaticAccessExpr) string
 				if isPublic {
 					return pkgPrefix + goClassName + symbol.ToGoName(memberName, true)
 				} else {
-					return pkgPrefix + "_" + strings.ToLower(classDecl.Name) + "_" + memberName
+					// 私有静态字段使用 _ClassName_fieldName 格式
+					return pkgPrefix + fmt.Sprintf("_%s_%s", goClassName, memberName)
 				}
 			}
 		}
@@ -3713,12 +4570,37 @@ func (g *CodeGen) generateMapLiteral(lit *parser.MapLiteral) string {
 // generateStructLiteral 生成结构体字面量
 func (g *CodeGen) generateStructLiteral(lit *parser.StructLiteral) string {
 	typeExpr := g.generateExpression(lit.Type)
+	
+	// 获取结构体类型名，用于查找结构体定义
+	var structName string
+	if ident, ok := lit.Type.(*parser.Identifier); ok {
+		structName = ident.Value
+	}
+	
 	var fields []string
 	for _, f := range lit.Fields {
 		if f.Name != "" {
-			// 保持用户写的字段名不变
-			// 用户应该使用与声明一致的名称（public 字段用大写，private 字段用小写）
-			fields = append(fields, f.Name+": "+g.generateExpression(f.Value))
+			// 查找结构体定义来确定字段是否是公开的
+			fieldName := f.Name
+			if structName != "" {
+				// 检查是否是导入的类型
+				if _, ok := g.typeToPackage[structName]; ok {
+					// 导入的公开结构体，字段应该使用大写开头
+					fieldName = symbol.ToGoName(f.Name, true)
+				} else {
+					// 检查本地结构体定义
+					if structDecl := g.transpiler.GetStructDecl(g.transpiler.pkg, structName); structDecl != nil {
+						for _, field := range structDecl.Fields {
+							if field.Name == f.Name {
+								isPublic := field.Visibility == "public" || field.Visibility == "protected"
+								fieldName = symbol.ToGoName(f.Name, isPublic)
+								break
+							}
+						}
+					}
+				}
+			}
+			fields = append(fields, fieldName+": "+g.generateExpression(f.Value))
 		} else {
 			fields = append(fields, g.generateExpression(f.Value))
 		}
@@ -3932,17 +4814,34 @@ func (g *CodeGen) generateStructType(t *parser.StructType) string {
 // 2. OOP 风格: new ClassName() -> NewClassName(NewDefaultClassNameInitOpts())
 //             new ClassName(name: "test") -> NewClassName(ClassNameInitOpts{Name: "test"})
 // 3. 泛型: new ClassName[T]() -> New__ClassName[T]()
+// 4. 带包前缀: new pkg.ClassName() -> pkg.New__ClassName()
 func (g *CodeGen) generateNewExpr(expr *parser.NewExpr) string {
 	// 获取类名和类型参数
 	className := ""
 	typeArgs := "" // 泛型类型参数 [T, K, ...]
+	pkgPrefix := ""
+	classPkg := g.transpiler.pkg // 默认当前包
 
 	if ident, ok := expr.Type.(*parser.Identifier); ok {
 		className = ident.Value
+	} else if sel, ok := expr.Type.(*parser.SelectorExpr); ok {
+		// pkg.ClassName 形式
+		if pkgIdent, ok := sel.X.(*parser.Identifier); ok {
+			pkgPrefix = pkgIdent.Value + "."
+			classPkg = pkgIdent.Value
+		}
+		className = sel.Sel
 	} else if gt, ok := expr.Type.(*parser.GenericType); ok {
 		// 泛型类型: Box[string]
 		if ident, ok := gt.Type.(*parser.Identifier); ok {
 			className = ident.Value
+		} else if sel, ok := gt.Type.(*parser.SelectorExpr); ok {
+			// pkg.ClassName[T] 形式
+			if pkgIdent, ok := sel.X.(*parser.Identifier); ok {
+				pkgPrefix = pkgIdent.Value + "."
+				classPkg = pkgIdent.Value
+			}
+			className = sel.Sel
 		} else {
 			// 复杂类型，使用 Go 风格
 			return "new(" + g.generateType(expr.Type) + ")"
@@ -3959,12 +4858,12 @@ func (g *CodeGen) generateNewExpr(expr *parser.NewExpr) string {
 	}
 
 	// OOP 风格的 new ClassName(args)
-	// 检查是否是导入的类型
-	pkgPrefix := ""
-	classPkg := g.transpiler.pkg // 默认当前包
-	if pkg, ok := g.typeToPackage[className]; ok {
-		pkgPrefix = pkg + "."
-		classPkg = pkg // 使用导入的包名
+	// 检查是否是导入的类型（通过 use 语句）
+	if pkgPrefix == "" {
+		if pkg, ok := g.typeToPackage[className]; ok {
+			pkgPrefix = pkg + "."
+			classPkg = pkg // 使用导入的包名
+		}
 	}
 
 	// 查找类声明以确定是否公开和是否有 init 参数
@@ -4022,16 +4921,10 @@ func (g *CodeGen) generateNewExpr(expr *parser.NewExpr) string {
 	// 默认行为：单个 init 或无 init
 	if len(expr.Arguments) == 0 {
 		// 无参数调用
-		// 检查是否需要使用 opts 模式
-		needOpts := false
+		// 只有已知类有带参数的 init 时才使用 opts 模式
+		// 外部包的类（classDecl == nil）不假设需要 opts 模式，直接使用 New__X()
 		if classDecl != nil && classDecl.InitMethod != nil && len(classDecl.InitMethod.Params) > 0 {
 			// 已知类有带参数的 init: 使用 opts 模式
-			needOpts = true
-		} else if classDecl == nil && typeArgs == "" {
-			// 外部包的类（非泛型），默认使用 opts 模式
-			needOpts = true
-		}
-		if needOpts && typeArgs == "" {
 			return fmt.Sprintf("%sNew__%s(%sNewDefault__%s__InitOpts())", pkgPrefix, goClassName, pkgPrefix, goClassName)
 		}
 		return fmt.Sprintf("%sNew__%s%s()", pkgPrefix, goClassName, typeArgs)

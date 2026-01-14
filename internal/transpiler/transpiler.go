@@ -9,18 +9,20 @@ import (
 
 // Transpiler 转译器
 type Transpiler struct {
-	table          *symbol.Table
-	pkg            string
-	imports        map[string]bool                    // 需要导入的包
-	needFmt        bool                               // 是否需要导入 fmt
-	funcDecls      map[string]*parser.FuncDecl        // 函数声明缓存 key: pkg.name
-	classDecls     map[string]*parser.ClassDecl       // 类声明缓存 key: pkg.name
-	interfaceDecls map[string]*parser.InterfaceDecl   // 接口声明缓存 key: pkg.name
-	errors         []string                           // 转译错误
-	config         *config.Config                     // 项目配置
-	typeImports    map[string]string                  // 类型名到包名的映射 (User -> models)
-	currentFile    string                             // 当前文件名（不含路径和后缀）
-	skipValidation bool                               // 跳过顶层语句验证（用于标准库）
+	table             *symbol.Table
+	pkg               string
+	imports           map[string]bool                    // 需要导入的包
+	needFmt           bool                               // 是否需要导入 fmt
+	funcDecls         map[string]*parser.FuncDecl        // 函数声明缓存 key: pkg.name
+	classDecls        map[string]*parser.ClassDecl       // 类声明缓存 key: pkg.name
+	interfaceDecls    map[string]*parser.InterfaceDecl   // 接口声明缓存 key: pkg.name
+	structDecls       map[string]*parser.StructDecl      // 结构体声明缓存 key: pkg.name
+	errors            []string                           // 转译错误
+	config            *config.Config                     // 项目配置
+	typeImports       map[string]string                  // 类型名到包名的映射 (User -> models)
+	currentFile       string                             // 当前文件名（不含路径和后缀）
+	skipValidation    bool                               // 跳过顶层语句验证（用于标准库）
+	currentParsedFile *parser.File                       // 当前正在处理的文件
 }
 
 // AddError 添加转译错误
@@ -37,6 +39,7 @@ func New(table *symbol.Table) *Transpiler {
 		funcDecls:      make(map[string]*parser.FuncDecl),
 		classDecls:     make(map[string]*parser.ClassDecl),
 		interfaceDecls: make(map[string]*parser.InterfaceDecl),
+		structDecls:    make(map[string]*parser.StructDecl),
 		errors:         []string{},
 		typeImports:    make(map[string]string),
 	}
@@ -72,6 +75,7 @@ func (t *Transpiler) TranspileFileWithName(file *parser.File, fileName string) (
 	t.needFmt = false
 	t.errors = []string{}
 	t.currentFile = fileName
+	t.currentParsedFile = file
 
 	// 缓存声明
 	for _, stmt := range file.Statements {
@@ -85,6 +89,9 @@ func (t *Transpiler) TranspileFileWithName(file *parser.File, fileName string) (
 		case *parser.InterfaceDecl:
 			key := t.pkg + "." + decl.Name
 			t.interfaceDecls[key] = decl
+		case *parser.StructDecl:
+			key := t.pkg + "." + decl.Name
+			t.structDecls[key] = decl
 		}
 	}
 
@@ -108,7 +115,7 @@ func (t *Transpiler) TranspileFileWithName(file *parser.File, fileName string) (
 				t.validateImplements(classDecl)
 			}
 			if classDecl.Extends != "" {
-				t.validateExtends(classDecl)
+				t.validateExtends(classDecl, file)
 			}
 			// 验证入口类的 main 方法
 			if t.IsEntryClass(classDecl) {
@@ -133,8 +140,10 @@ func (t *Transpiler) TranspileFileWithName(file *parser.File, fileName string) (
 	// 校验方法/字段访问的可见性
 	t.validateVisibility(file)
 	
-	// 校验未定义的符号
-	t.validateUndefinedSymbols(file)
+	// 校验未定义的符号（标准库跳过，因为同包内的类引用不需要导入）
+	if !t.skipValidation {
+		t.validateUndefinedSymbols(file)
+	}
 	
 	// 校验未使用的导入
 	t.validateUnusedImports(file)
@@ -220,6 +229,12 @@ func (t *Transpiler) GetFuncDecl(pkg, name string) *parser.FuncDecl {
 func (t *Transpiler) GetClassDecl(pkg, name string) *parser.ClassDecl {
 	key := pkg + "." + name
 	return t.classDecls[key]
+}
+
+// GetStructDecl 获取结构体声明
+func (t *Transpiler) GetStructDecl(pkg, name string) *parser.StructDecl {
+	key := pkg + "." + name
+	return t.structDecls[key]
 }
 
 // AddImport 添加需要导入的包
@@ -410,19 +425,23 @@ func (t *Transpiler) validateStructMethodSignature(structName, ifaceName string,
 }
 
 // validateExtends 校验子类是否正确实现了父类的所有抽象方法
-func (t *Transpiler) validateExtends(classDecl *parser.ClassDecl) {
+func (t *Transpiler) validateExtends(classDecl *parser.ClassDecl, file *parser.File) {
 	// 查找父类信息
 	parentInfo := t.table.GetClass(t.pkg, classDecl.Extends)
 	if parentInfo == nil {
+		// 检查是否是通过 use 导入的外部类（如 tugo.db.model）
+		// 外部类无法验证，跳过检查
+		if t.isImportedType(classDecl.Extends, file) {
+			return
+		}
 		t.errors = append(t.errors, i18n.T(i18n.ErrParentClassNotFound,
 			classDecl.Name, classDecl.Extends))
 		return
 	}
 
-	// 父类必须是抽象类
+	// 只有抽象类需要检查方法实现
 	if !parentInfo.Abstract {
-		t.errors = append(t.errors, i18n.T(i18n.ErrExtendNonAbstract,
-			classDecl.Name, classDecl.Extends))
+		// 普通类继承：允许，无需额外检查
 		return
 	}
 
@@ -451,6 +470,30 @@ func (t *Transpiler) validateExtends(classDecl *parser.ClassDecl) {
 			t.errors = append(t.errors, err)
 		}
 	}
+}
+
+// isImportedType 检查类型是否是通过 use 导入的外部类型
+func (t *Transpiler) isImportedType(typeName string, file *parser.File) bool {
+	// 检查当前文件的 use 导入
+	if file != nil {
+		for _, importDecl := range file.Imports {
+			for _, spec := range importDecl.Specs {
+				// 只检查 tugo use 导入，不检查 Go import
+				if spec.IsGoImport {
+					continue
+				}
+				// use "tugo.db.model" 导入的 model
+				if spec.TypeName == typeName {
+					return true
+				}
+				// use "tugo.db.DB" as SomeAlias
+				if spec.Alias != "" && spec.Alias == typeName {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // validateAbstractMethodSignature 校验抽象方法签名是否匹配
@@ -831,7 +874,7 @@ func (t *Transpiler) validateErrableCallsInExpr(funcName string, funcIsErrable b
 
 // validateUndefinedSymbols 校验文件中使用的所有符号是否已定义或导入
 func (t *Transpiler) validateUndefinedSymbols(file *parser.File) {
-	// 收集所有导入的类型
+	// 收集所有导入的类型和包名
 	importedTypes := make(map[string]bool)
 	
 	// 从导入语句收集
@@ -844,6 +887,11 @@ func (t *Transpiler) validateUndefinedSymbols(file *parser.File) {
 			// 导入的类型名
 			if spec.TypeName != "" {
 				importedTypes[spec.TypeName] = true
+			}
+			// Go import 语句：收集包名
+			// 例如 import "com.example.orm/models" 应该注册 "models"
+			if spec.IsGoImport && spec.PkgName != "" {
+				importedTypes[spec.PkgName] = true
 			}
 		}
 	}
@@ -1078,6 +1126,14 @@ func (t *Transpiler) collectUsedTypesInStmt(stmt parser.Statement, usedTypes map
 	
 	switch s := stmt.(type) {
 	case *parser.ClassDecl:
+		// 检查父类（extends）
+		if s.Extends != "" {
+			usedTypes[s.Extends] = true
+		}
+		// 检查实现的接口
+		for _, impl := range s.Implements {
+			usedTypes[impl] = true
+		}
 		// 检查类中的方法
 		for _, method := range s.Methods {
 			if method.Body != nil {
@@ -1175,6 +1231,9 @@ func (t *Transpiler) collectUsedTypesInExpr(expr parser.Expression, usedTypes ma
 		// 检查构造函数调用 new Type()
 		if newExpr, ok := e.Function.(*parser.NewExpr); ok {
 			t.collectTypeNameFromExpr(newExpr.Type, usedTypes)
+		} else if ident, ok := e.Function.(*parser.Identifier); ok {
+			// 函数调用，如 getDB() - 标记函数名为使用
+			usedTypes[ident.Value] = true
 		} else {
 			t.collectUsedTypesInExpr(e.Function, usedTypes)
 		}
@@ -1200,6 +1259,14 @@ func (t *Transpiler) collectUsedTypesInExpr(expr parser.Expression, usedTypes ma
 		t.collectUsedTypesInExpr(e.Index, usedTypes)
 	case *parser.SelectorExpr:
 		t.collectUsedTypesInExpr(e.X, usedTypes)
+	case *parser.StructLiteral:
+		// 结构体字面量 Type{...}
+		t.collectTypeNameFromExpr(e.Type, usedTypes)
+		for _, field := range e.Fields {
+			t.collectUsedTypesInExpr(field.Value, usedTypes)
+		}
+	case *parser.Identifier:
+		// 标识符可能是类型或变量，这里不处理（由其他地方处理）
 	}
 }
 
@@ -1538,4 +1605,35 @@ func (t *Transpiler) inferReceiverTypeWithVars(expr parser.Expression, varTypes 
 		}
 	}
 	return ""
+}
+
+// GetExternalClass 获取外部包的类信息
+// 用于在生成继承方法包装时获取外部父类的方法信息
+func (t *Transpiler) GetExternalClass(pkgName, className string) *symbol.ClassInfo {
+	// 首先尝试从符号表获取
+	classInfo := t.table.GetClass(pkgName, className)
+	if classInfo != nil {
+		return classInfo
+	}
+
+	// 尝试从类声明缓存获取
+	key := pkgName + "." + className
+	if classDecl, ok := t.classDecls[key]; ok {
+		// 转换为 ClassInfo
+		return &symbol.ClassInfo{
+			Name:            classDecl.Name,
+			GoName:          symbol.ToGoName(classDecl.Name, classDecl.Public),
+			Public:          classDecl.Public,
+			Abstract:        classDecl.Abstract,
+			Package:         pkgName,
+			Extends:         classDecl.Extends,
+			Implements:      classDecl.Implements,
+			Fields:          classDecl.Fields,
+			Methods:         classDecl.Methods,
+			AbstractMethods: classDecl.AbstractMethods,
+			InitMethod:      classDecl.InitMethod,
+		}
+	}
+
+	return nil
 }

@@ -75,6 +75,7 @@ type ClassInfo struct {
 	Methods         []*parser.ClassMethod
 	AbstractMethods []*parser.ClassMethod
 	InitMethod      *parser.ClassMethod
+	SelfMethods     map[string]bool     // 需要 self 传递的方法名（用于继承时的虚方法包装）
 }
 
 // Table 符号表

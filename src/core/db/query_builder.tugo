@@ -1,0 +1,222 @@
+package db
+
+import "gorm.io/gorm"
+
+// queryBuilder 查询构建器
+// 提供链式查询 API
+public class queryBuilder[T any] {
+    private db *gorm.DB
+    
+    public func init(db *gorm.DB) {
+        this.db = db
+    }
+    
+    // 静态方法：从全局 DB 创建查询构建器
+    public static func query() *queryBuilder[T] {
+        dbInst := DB::getInstance()
+        if dbInst == nil {
+            return nil
+        }
+        var model T
+        return new queryBuilder[T](dbInst.default_().Model(&model))
+    }
+    
+    // 静态方法：从指定连接创建查询构建器
+    public static func queryOn(connName string) *queryBuilder[T] {
+        dbInst := DB::getInstance()
+        if dbInst == nil {
+            return nil
+        }
+        conn := dbInst.connection(connName)
+        if conn == nil {
+            return nil
+        }
+        var model T
+        return new queryBuilder[T](conn.Model(&model))
+    }
+    
+    // where 添加 WHERE 条件
+    public func where(query string, args ...any) *queryBuilder[T] {
+        this.db = this.db.Where(query, args...)
+        return this
+    }
+    
+    // orWhere 添加 OR WHERE 条件
+    public func orWhere(query string, args ...any) *queryBuilder[T] {
+        this.db = this.db.Or(query, args...)
+        return this
+    }
+    
+    // whereIn 添加 WHERE IN 条件
+    public func whereIn(field string, values []any) *queryBuilder[T] {
+        this.db = this.db.Where(field + " IN ?", values)
+        return this
+    }
+    
+    // whereNotIn 添加 WHERE NOT IN 条件
+    public func whereNotIn(field string, values []any) *queryBuilder[T] {
+        this.db = this.db.Where(field + " NOT IN ?", values)
+        return this
+    }
+    
+    // whereNull 添加 WHERE IS NULL 条件
+    public func whereNull(field string) *queryBuilder[T] {
+        this.db = this.db.Where(field + " IS NULL")
+        return this
+    }
+    
+    // whereNotNull 添加 WHERE IS NOT NULL 条件
+    public func whereNotNull(field string) *queryBuilder[T] {
+        this.db = this.db.Where(field + " IS NOT NULL")
+        return this
+    }
+    
+    // orderBy 添加排序
+    public func orderBy(field string, direction string) *queryBuilder[T] {
+        this.db = this.db.Order(field + " " + direction)
+        return this
+    }
+    
+    // orderByAsc 升序排序
+    public func orderByAsc(field string) *queryBuilder[T] {
+        return this.orderBy(field, "ASC")
+    }
+    
+    // orderByDesc 降序排序
+    public func orderByDesc(field string) *queryBuilder[T] {
+        return this.orderBy(field, "DESC")
+    }
+    
+    // limit 限制返回数量
+    public func limit(n int) *queryBuilder[T] {
+        this.db = this.db.Limit(n)
+        return this
+    }
+    
+    // offset 设置偏移量
+    public func offset(n int) *queryBuilder[T] {
+        this.db = this.db.Offset(n)
+        return this
+    }
+    
+    // select_ 选择字段
+    public func select_(fields ...string) *queryBuilder[T] {
+        this.db = this.db.Select(fields)
+        return this
+    }
+    
+    // groupBy 分组
+    public func groupBy(fields ...string) *queryBuilder[T] {
+        for _, field := range fields {
+            this.db = this.db.Group(field)
+        }
+        return this
+    }
+    
+    // having 添加 HAVING 条件
+    public func having(query string, args ...any) *queryBuilder[T] {
+        this.db = this.db.Having(query, args...)
+        return this
+    }
+    
+    // join 添加 JOIN
+    public func join(query string, args ...any) *queryBuilder[T] {
+        this.db = this.db.Joins(query, args...)
+        return this
+    }
+    
+    // preload 预加载关联
+    public func preload(query string, args ...any) *queryBuilder[T] {
+        this.db = this.db.Preload(query, args...)
+        return this
+    }
+    
+    // first 获取第一条记录
+    public func first() (T, error) {
+        var result T
+        err := this.db.First(&result).Error
+        return result, err
+    }
+    
+    // firstOrFail 获取第一条记录，不存在则抛出错误
+    public func firstOrFail() T! {
+        var result T
+        err := this.db.First(&result).Error
+        if err != nil {
+            throw err
+        }
+        return result
+    }
+    
+    // get 获取所有匹配的记录
+    public func get() ([]T, error) {
+        var results []T
+        err := this.db.Find(&results).Error
+        return results, err
+    }
+    
+    // all 获取所有记录（无条件）
+    public func all() ([]T, error) {
+        var results []T
+        err := this.db.Find(&results).Error
+        return results, err
+    }
+    
+    // find 根据主键查找
+    public func find(id any) (T, error) {
+        var result T
+        err := this.db.First(&result, id).Error
+        return result, err
+    }
+    
+    // findOrFail 根据主键查找，不存在则抛出错误
+    public func findOrFail(id any) T! {
+        var result T
+        err := this.db.First(&result, id).Error
+        if err != nil {
+            throw err
+        }
+        return result
+    }
+    
+    // count 计数
+    public func count() (int64, error) {
+        var count int64
+        err := this.db.Count(&count).Error
+        return count, err
+    }
+    
+    // exists 检查是否存在
+    public func exists() (bool, error) {
+        count, err := this.count()
+        return count > 0, err
+    }
+    
+    // pluck 获取单个字段的值
+    public func pluck(field string) ([]any, error) {
+        var values []any
+        err := this.db.Pluck(field, &values).Error
+        return values, err
+    }
+    
+    // update 更新字段
+    public func update(field string, value any) error {
+        return this.db.Update(field, value).Error
+    }
+    
+    // updates 批量更新
+    public func updates(values map[string]any) error {
+        return this.db.Updates(values).Error
+    }
+    
+    // delete_ 删除匹配的记录
+    public func delete_() error {
+        var model T
+        return this.db.Delete(&model).Error
+    }
+    
+    // getDB 获取底层的 gorm.DB
+    public func getDB() *gorm.DB {
+        return this.db
+    }
+}

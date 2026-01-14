@@ -1,4 +1,4 @@
-package lang
+package runtime
 
 // ClassInfo 类型信息结构体
 // 用于在运行时获取 tugo class 的元信息
